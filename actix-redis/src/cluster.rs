@@ -200,6 +200,20 @@ impl Handler<Retry> for RedisClusterActor {
 
                                 do_retry(this, addr.to_string(), req, retry + 1)
                             }
+                            Ok(Err(Error::NotConnected)) if retry < MAX_RETRY => {
+                                warn!("redis node is not connected");
+                                this.connections.clear();
+                                ctx.wait(this.refresh_slots());
+                                do_retry(this, this.initial_addr.clone(), req, retry + 1)
+                            }
+                            Ok(Ok(RespValue::Error(ref e)))
+                                if e.starts_with("CLUSTERDOWN") && retry < MAX_RETRY =>
+                            {
+                                warn!("redis cluster is down: {:?}", e);
+                                this.connections.clear();
+                                ctx.wait(this.refresh_slots());
+                                do_retry(this, this.initial_addr.clone(), req, retry + 1)
+                            }
                             Ok(Ok(res)) => Box::pin(ok(res)),
                             Ok(Err(e)) => Box::pin(err(e)),
                             Err(_canceled) => Box::pin(err(Error::Disconnected)),
