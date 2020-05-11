@@ -30,13 +30,21 @@ pub struct RedisSession<R: Actor = RedisActor>(Rc<Inner<R>>);
 impl RedisSession<RedisActor> {
     /// Create new redis session backend
     ///
-    /// * `addr` - address of the redis server
-    pub fn new<S: Into<String>>(addr: S, key: &[u8]) -> Self {
+    /// * `server` - redis server
+    pub fn new<S: Into<String>>(server: S, key: &[u8]) -> Self {
+        let redis_addr = RedisActor::start(server);
+        Self::from_redis(redis_addr, key)
+    }
+
+    /// Create new redis session backend
+    ///
+    /// * `addr` - Addr of the redis actor
+    pub fn from_redis(addr: Addr<RedisActor>, key: &[u8]) -> Self {
         RedisSession(Rc::new(Inner {
             key: Key::from_master(key),
             cache_keygen: Box::new(|key: &str| format!("session:{}", &key)),
             ttl: 7200,
-            addr: RedisActor::start(addr),
+            addr: addr,
             name: "actix-session".to_owned(),
             path: "/".to_owned(),
             domain: None,
@@ -49,15 +57,23 @@ impl RedisSession<RedisActor> {
 }
 
 impl RedisSession<RedisClusterActor> {
-    /// Create new redis session backend with Redis Cluster
+    /// Create new redis session backend with redis cluster
     ///
-    /// * `addr` - address of the redis server
-    pub fn new_cluster<S: Into<String>>(addr: S, key: &[u8]) -> Self {
+    /// * `server` - the master server of redis cluster
+    pub fn new_cluster<S: Into<String>>(server: S, key: &[u8]) -> Self {
+        let redis_addr = RedisClusterActor::start(server);
+        Self::from_cluster(redis_addr, key)
+    }
+
+    /// Create new redis session backend from redis cluster
+    ///
+    /// * `addr` - Addr of the redis cluster actor
+    pub fn from_cluster(addr: Addr<RedisClusterActor>, key: &[u8]) -> Self {
         RedisSession(Rc::new(Inner {
             key: Key::from_master(key),
             cache_keygen: Box::new(|key: &str| format!("session:{}", &key)),
             ttl: 7200,
-            addr: RedisClusterActor::start(addr),
+            addr: addr,
             name: "actix-session".to_owned(),
             path: "/".to_owned(),
             domain: None,
