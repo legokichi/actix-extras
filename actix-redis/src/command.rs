@@ -7,6 +7,7 @@ mod echo;
 mod get;
 mod ping;
 mod set;
+mod shutdown;
 
 pub use asking::{asking, Asking};
 pub use cluster_slots::{cluster_slots, ClusterSlots};
@@ -15,6 +16,7 @@ pub use echo::{echo, Echo};
 pub use get::{get, Get};
 pub use ping::{ping, ping_message, Ping};
 pub use set::{set, Set};
+pub use shutdown::{shutdown, Shutdown};
 
 use redis_async::resp::RespValue;
 
@@ -68,4 +70,33 @@ pub trait RedisClusterCommand: RedisCommand {
     /// This method will return an error if the keys have different slots,
     /// as such a request may be rejected by Redis if the slots are served by different nodes.
     fn slot(&self) -> Result<u16, Vec<u16>>;
+}
+
+/// A Redis command directed to a node serving the slot
+#[derive(Debug)]
+pub struct DirectedTo<C> {
+    pub command: C,
+    pub slot: u16,
+}
+
+impl<C: RedisCommand> RedisCommand for DirectedTo<C> {
+    type Output = C::Output;
+
+    fn serialize(self) -> RespValue {
+        self.command.serialize()
+    }
+
+    fn deserialize(resp: RespValue) -> Result<Self::Output, DeserializeError> {
+        C::deserialize(resp)
+    }
+}
+
+impl<C: RedisCommand> RedisClusterCommand for DirectedTo<C> {
+    fn slot(&self) -> Result<u16, Vec<u16>> {
+        Ok(self.slot)
+    }
+}
+
+impl<C: actix::Message> actix::Message for DirectedTo<C> {
+    type Result = C::Result;
 }
