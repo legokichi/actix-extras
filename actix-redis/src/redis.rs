@@ -73,7 +73,7 @@ impl Actor for RedisActor {
                         act.backoff.reset();
                     }
                     Err(err) => {
-                        error!("Can not connect to redis server: {}", err);
+                        error!("Can not connect to redis server({}): {}", act.addr, err);
                         // re-connect with backoff time.
                         // we stop current context, supervisor will restart it.
                         if let Some(timeout) = act.backoff.next_backoff() {
@@ -82,7 +82,7 @@ impl Actor for RedisActor {
                     }
                 },
                 Err(err) => {
-                    error!("Can not connect to redis server: {}", err);
+                    error!("Can not connect to redis server({}): {}", act.addr, err);
                     // re-connect with backoff time.
                     // we stop current context, supervisor will restart it.
                     if let Some(timeout) = act.backoff.next_backoff() {
