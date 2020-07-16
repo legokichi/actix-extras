@@ -79,6 +79,130 @@ impl RedisClusterActor {
                 }),
         )
     }
+    
+    fn dispatch(
+        &mut self,
+        slot: u16,
+        addr: Option<String>,
+        req: RespValue,
+        retry: usize,
+    ) -> ResponseActFuture<Self, Result<RespValue, Error>> {
+        use actix::fut::{err, ok};
+
+        debug!(
+            "processing: slot = {}, addr = {:?}, retry = {}, request = {:?}",
+            slot,
+            addr,
+            retry,
+            DebugResp(&req)
+        );
+
+        // If the node address is specified (in the case of redirection), use the address.
+        // Otherwise, select the node based on slot information.
+        let addr = match addr {
+            Some(addr) => addr,
+            None => {
+                if let Some(slots) = self
+                    .slots
+                    .iter()
+                    .find(|slots| slots.start <= slot && slot <= slots.end)
+                {
+                    slots.master_addr()
+                } else {
+                    warn!("no node is serving the slot {}", slot);
+                    return Box::pin(err(Error::NotConnected));
+                }
+            }
+        };
+
+        let connection = self
+            .connections
+            .entry(addr.clone())
+            .or_insert_with(move || RedisActor::start(addr));
+        // TODO: delay retry until refreshing slots succeeds
+        Box::pin(
+            connection
+                .send(crate::redis::Command(req.clone()))
+                .into_actor(self)
+                .then(move |res, this, ctx| {
+                    debug!(
+                        "received: {:?}",
+                        res.as_ref().map(|res| res.as_ref().map(DebugResp))
+                    );
+                    match res {
+                        Ok(Ok(RespValue::Error(ref e)))
+                            if e.starts_with("MOVED") && retry < MAX_RETRY =>
+                        {
+                            info!(
+                                "MOVED redirection: retry = {}, request = {:?}",
+                                retry,
+                                DebugResp(&req)
+                            );
+
+                            let mut values = e.split(' ');
+                            let _moved = values.next().unwrap();
+                            let _slot = values.next().unwrap();
+                            let addr = values.next().unwrap().to_string();
+
+                            ctx.wait(this.refresh_slots());
+                            this.dispatch(slot, Some(addr), req, retry + 1)
+                        }
+                        Ok(Ok(RespValue::Error(ref e)))
+                            if e.starts_with("ASK") && retry < MAX_RETRY =>
+                        {
+                            info!(
+                                "ASK redirection: retry = {}, request = {:?}",
+                                retry,
+                                DebugResp(&req)
+                            );
+
+                            let mut values = e.split(' ');
+                            let _moved = values.next().unwrap();
+                            let _slot = values.next().unwrap();
+                            let addr = values.next().unwrap().to_string();
+
+                            ctx.spawn(
+                                // No retry for ASKING
+                                this.dispatch(
+                                    slot,
+                                    Some(addr.clone()),
+                                    Asking.serialize(),
+                                    MAX_RETRY,
+                                )
+                                .map(
+                                    |res, _this, _ctx| {
+                                        match res.map(Asking::deserialize) {
+                                            Ok(Ok(())) => {}
+                                            e => {
+                                                warn!("failed to issue ASKING: {:?}", e)
+                                            }
+                                        };
+                                    },
+                                ),
+                            );
+                            this.dispatch(slot, Some(addr), req, retry + 1)
+                        }
+                        Ok(Err(Error::NotConnected)) if retry < MAX_RETRY => {
+                            warn!("redis node is not connected");
+                            this.connections.clear();
+                            ctx.wait(this.refresh_slots());
+                            this.dispatch(slot, None, req, retry + 1)
+                        }
+                        Ok(Ok(RespValue::Error(ref e)))
+                            if e.starts_with("CLUSTERDOWN") && retry < MAX_RETRY =>
+                        {
+                            warn!("redis cluster is down: {:?}", e);
+                            this.connections.clear();
+                            ctx.wait(this.refresh_slots());
+                            this.dispatch(slot, None, req, retry + 1)
+                        }
+                        Ok(Ok(res)) => Box::pin(ok(res)),
+                        Ok(Err(e)) => Box::pin(err(e)),
+                        Err(_canceled) => Box::pin(err(Error::Disconnected)),
+                    }
+                }),
+        )
+    }
 }
 
 impl Actor for RedisClusterActor {
@@ -96,137 +220,6 @@ impl Supervised for RedisClusterActor {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Retry {
-    addr: String,
-    req: RespValue,
-    retry: usize,
-}
-
-impl Message for Retry {
-    type Result = Result<RespValue, Error>;
-}
-
-impl Retry {
-    fn new(addr: String, req: RespValue, retry: usize) -> Self {
-        Retry { addr, req, retry }
-    }
-}
-
-impl Handler<Retry> for RedisClusterActor {
-    type Result = ResponseActFuture<RedisClusterActor, Result<RespValue, Error>>;
-
-    fn handle(&mut self, msg: Retry, _ctx: &mut Self::Context) -> Self::Result {
-        fn do_retry(
-            this: &mut RedisClusterActor,
-            addr: String,
-            req: RespValue,
-            retry: usize,
-        ) -> ResponseActFuture<RedisClusterActor, Result<RespValue, Error>> {
-            use actix::fut::{err, ok};
-
-            debug!(
-                "processing: addr = {}, retry = {}, request = {:?}",
-                addr,
-                retry,
-                DebugResp(&req)
-            );
-
-            let connection = this
-                .connections
-                .entry(addr.clone())
-                .or_insert_with(move || RedisActor::start(addr));
-            Box::pin(
-                connection
-                    .send(crate::redis::Command(req.clone()))
-                    .into_actor(this)
-                    .then(move |res, this, ctx| {
-                        debug!(
-                            "received: {:?}",
-                            res.as_ref().map(|res| res.as_ref().map(DebugResp))
-                        );
-                        match res {
-                            Ok(Ok(RespValue::Error(ref e)))
-                                if e.starts_with("MOVED") && retry < MAX_RETRY =>
-                            {
-                                info!(
-                                    "MOVED redirection: retry = {}, request = {:?}",
-                                    retry,
-                                    DebugResp(&req)
-                                );
-
-                                let mut values = e.split(' ');
-                                let _moved = values.next().unwrap();
-                                let _slot = values.next().unwrap();
-                                let addr = values.next().unwrap();
-
-                                ctx.wait(this.refresh_slots());
-
-                                do_retry(this, addr.to_string(), req, retry + 1)
-                            }
-                            Ok(Ok(RespValue::Error(ref e)))
-                                if e.starts_with("ASK") && retry < MAX_RETRY =>
-                            {
-                                info!(
-                                    "ASK redirection: retry = {}, request = {:?}",
-                                    retry,
-                                    DebugResp(&req)
-                                );
-
-                                let mut values = e.split(' ');
-                                let _moved = values.next().unwrap();
-                                let _slot = values.next().unwrap();
-                                let addr = values.next().unwrap();
-
-                                ctx.spawn(
-                                    // No retry for ASKING
-                                    do_retry(
-                                        this,
-                                        addr.to_string(),
-                                        Asking.serialize(),
-                                        MAX_RETRY,
-                                    )
-                                    .map(
-                                        |res, _this, _ctx| {
-                                            match res.map(Asking::deserialize) {
-                                                Ok(Ok(())) => {}
-                                                e => warn!(
-                                                    "failed to issue ASKING: {:?}",
-                                                    e
-                                                ),
-                                            };
-                                        },
-                                    ),
-                                );
-
-                                do_retry(this, addr.to_string(), req, retry + 1)
-                            }
-                            Ok(Err(Error::NotConnected)) if retry < MAX_RETRY => {
-                                warn!("redis node is not connected");
-                                this.connections.clear();
-                                ctx.wait(this.refresh_slots());
-                                do_retry(this, this.initial_addr.clone(), req, retry + 1)
-                            }
-                            Ok(Ok(RespValue::Error(ref e)))
-                                if e.starts_with("CLUSTERDOWN") && retry < MAX_RETRY =>
-                            {
-                                warn!("redis cluster is down: {:?}", e);
-                                this.connections.clear();
-                                ctx.wait(this.refresh_slots());
-                                do_retry(this, this.initial_addr.clone(), req, retry + 1)
-                            }
-                            Ok(Ok(res)) => Box::pin(ok(res)),
-                            Ok(Err(e)) => Box::pin(err(e)),
-                            Err(_canceled) => Box::pin(err(Error::Disconnected)),
-                        }
-                    }),
-            )
-        }
-
-        do_retry(self, msg.addr, msg.req, msg.retry)
-    }
-}
-
 impl<T> Handler<T> for RedisClusterActor
 where
     T: RedisClusterCommand
@@ -235,7 +228,7 @@ where
 {
     type Result = ResponseActFuture<RedisClusterActor, Result<T::Output, Error>>;
 
-    fn handle(&mut self, msg: T, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: T, _ctx: &mut Self::Context) -> Self::Result {
         // refuse operations over multiple slots
         let slot = match msg.slot() {
             Ok(slot) => slot,
@@ -243,19 +236,7 @@ where
         };
         let req = msg.serialize();
 
-        let fut = if let Some(slots) = self
-            .slots
-            .iter()
-            .find(|slots| slots.start <= slot && slot <= slots.end)
-        {
-            let addr = slots.master_addr();
-            actix::Handler::handle(self, Retry::new(addr, req, 0), ctx)
-        } else {
-            warn!("no node is serving the slot {}", slot);
-            Box::pin(actix::fut::err(Error::NotConnected))
-        };
-
-        Box::pin(fut.map(|res, _this, _ctx| {
+        Box::pin(self.dispatch(slot, None, req, 0).map(|res, _this, _ctx| {
             match res {
                 Ok(res) => T::deserialize(res)
                     .map_err(|e| Error::Redis(RespError::RESP(e.message, e.resp))),
