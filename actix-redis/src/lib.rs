@@ -5,14 +5,7 @@
 //! * [API Documentation (Releases)](https://docs.rs/actix-redis/)
 //! * [Chat on gitter](https://gitter.im/actix/actix)
 //! * Cargo package: [actix-redis](https://crates.io/crates/actix-redis)
-//! * Minimum supported Rust version: 1.26 or later
-//!
-#[macro_use]
-extern crate log;
-extern crate redis_async;
-#[macro_use]
-extern crate derive_more;
-
+//! * Minimum supported Rust version: 1.40.0 or later
 mod cluster;
 pub mod command;
 mod redis;
@@ -20,6 +13,8 @@ pub mod slot;
 
 pub use cluster::RedisClusterActor;
 pub use redis::{Command, RedisActor};
+
+use derive_more::{Display, From};
 
 #[cfg(feature = "web")]
 mod session;

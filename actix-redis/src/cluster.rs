@@ -1,5 +1,6 @@
 use actix::prelude::*;
 use futures_util::future::FutureExt;
+use log::{debug, info, warn};
 use redis_async::resp::RespValue;
 
 use std::collections::HashMap;

@@ -41,7 +41,7 @@ impl RedisSession<RedisActor> {
     /// * `addr` - Addr of the redis actor
     pub fn from_redis(addr: Addr<RedisActor>, key: &[u8]) -> Self {
         RedisSession(Rc::new(Inner {
-            key: Key::from_master(key),
+            key: Key::derive_from(key),
             cache_keygen: Box::new(|key: &str| format!("session:{}", &key)),
             ttl: 7200,
             addr,
@@ -70,7 +70,7 @@ impl RedisSession<RedisClusterActor> {
     /// * `addr` - Addr of the redis cluster actor
     pub fn from_cluster(addr: Addr<RedisClusterActor>, key: &[u8]) -> Self {
         RedisSession(Rc::new(Inner {
-            key: Key::from_master(key),
+            key: Key::derive_from(key),
             cache_keygen: Box::new(|key: &str| format!("session:{}", &key)),
             ttl: 7200,
             addr,

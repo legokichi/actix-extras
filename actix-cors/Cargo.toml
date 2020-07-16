@@ -8,7 +8,7 @@ keywords = ["cors", "web", "framework"]
 homepage = "https://actix.rs"
 repository = "https://github.com/actix/actix-extras.git"
 documentation = "https://docs.rs/actix-cors/"
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 edition = "2018"
 
 [lib]
@@ -16,7 +16,7 @@ name = "actix_cors"
 path = "src/lib.rs"
 
 [dependencies]
-actix-web = "3.0.0-alpha.1"
+actix-web = { version = "3.0.0-alpha.1", default_features = false }
 actix-service = "1.0.1"
 derive_more = "0.99.2"
 futures-util = { version = "0.3.4", default-features = false }
