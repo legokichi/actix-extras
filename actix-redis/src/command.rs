@@ -1,19 +1,27 @@
 //! Redis command types.
 
 mod asking;
+mod cluster_countkeysinslot;
+mod cluster_getkeysinslot;
+pub mod cluster_setslot;
 mod cluster_slots;
 mod del;
 mod echo;
 mod get;
+mod migrate;
 mod ping;
 mod set;
 mod shutdown;
 
 pub use asking::{asking, Asking};
+pub use cluster_countkeysinslot::{cluster_count_keys_in_slot, ClusterCountKeysInSlot};
+pub use cluster_getkeysinslot::{cluster_get_keys_in_slot, ClusterGetKeysInSlot};
+pub use cluster_setslot::ClusterSetSlot;
 pub use cluster_slots::{cluster_slots, ClusterSlots};
 pub use del::{del, del_multiple, Del};
 pub use echo::{echo, Echo};
 pub use get::{get, Get};
+pub use migrate::{migrate, Migrate};
 pub use ping::{ping, ping_message, Ping};
 pub use set::{set, Set};
 pub use shutdown::{shutdown, Shutdown};

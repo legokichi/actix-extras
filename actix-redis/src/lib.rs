@@ -48,7 +48,7 @@ pub struct Slots {
     pub end: u16,
     /// IP address, port, id of nodes serving the slots.
     /// The first entry corresponds to the master node.
-    pub nodes: Vec<(String, i64, Option<String>)>,
+    pub nodes: Vec<(String, u16, Option<String>)>,
 }
 
 impl Slots {

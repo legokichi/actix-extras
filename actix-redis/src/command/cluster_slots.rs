@@ -20,10 +20,17 @@ impl RedisCommand for ClusterSlots {
     }
 
     fn deserialize(resp: RespValue) -> Result<Self::Output, DeserializeError> {
+        use std::convert::TryInto;
+
         // FromResp returns redis_async::Error, so we need our own version of conversions here
-        fn parse_int(resp: RespValue) -> Result<i64, DeserializeError> {
+        fn parse_int(resp: RespValue) -> Result<u16, DeserializeError> {
             match resp {
-                Integer(i) => Ok(i),
+                Integer(i) => i.try_into().map_err(|_| {
+                    DeserializeError::new(
+                        "CLUSTER SLOTS: integer out of range",
+                        Integer(i),
+                    )
+                }),
                 resp => {
                     Err(DeserializeError::new("CLUSTER SLOTS: not an integer", resp))
                 }
@@ -39,13 +46,11 @@ impl RedisCommand for ClusterSlots {
         }
 
         fn parse_entry(resp: RespValue) -> Result<Slots, DeserializeError> {
-            use std::convert::TryInto;
-
             match resp {
                 Array(values) if values.len() >= 3 => {
                     let mut it = values.into_iter();
-                    let start: u16 = parse_int(it.next().unwrap())?.try_into().unwrap();
-                    let end: u16 = parse_int(it.next().unwrap())?.try_into().unwrap();
+                    let start = parse_int(it.next().unwrap())?;
+                    let end = parse_int(it.next().unwrap())?;
 
                     let nodes = it
                         .map(|node| match node {
