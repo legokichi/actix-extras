@@ -1,4 +1,5 @@
 use actix::prelude::*;
+use actix_utils::oneshot;
 use futures_util::future::FutureExt;
 use log::{debug, info, warn};
 use redis_async::resp::RespValue;
@@ -79,16 +80,15 @@ impl RedisClusterActor {
                 }),
         )
     }
-    
+
     fn dispatch(
         &mut self,
         slot: u16,
         addr: Option<String>,
         req: RespValue,
         retry: usize,
-    ) -> ResponseActFuture<Self, Result<RespValue, Error>> {
-        use actix::fut::{err, ok};
-
+        sender: oneshot::Sender<Result<RespValue, Error>>,
+    ) -> ResponseActFuture<Self, ()> {
         debug!(
             "processing: slot = {}, addr = {:?}, retry = {}, request = {:?}",
             slot,
@@ -110,7 +110,8 @@ impl RedisClusterActor {
                     slots.master_addr()
                 } else {
                     warn!("no node is serving the slot {}", slot);
-                    return Box::pin(err(Error::NotConnected));
+                    let _ = sender.send(Err(Error::NotConnected));
+                    return Box::pin(actix::fut::ready(()));
                 }
             }
         };
@@ -119,17 +120,21 @@ impl RedisClusterActor {
             .connections
             .entry(addr.clone())
             .or_insert_with(move || RedisActor::start(addr));
-        // TODO: delay retry until refreshing slots succeeds
         Box::pin(
             connection
                 .send(crate::redis::Command(req.clone()))
                 .into_actor(self)
-                .then(move |res, this, ctx| {
+                .map(move |res, this, ctx| {
                     debug!(
                         "received: {:?}",
                         res.as_ref().map(|res| res.as_ref().map(DebugResp))
                     );
                     match res {
+                        // In the case of MOVED and ASK redirection, a retry is performed without
+                        // waiting for the slot information to be updated. This is because the
+                        // redirection includes the destination node information.
+                        //
+                        // TODO: Throttle the slot information update
                         Ok(Ok(RespValue::Error(ref e)))
                             if e.starts_with("MOVED") && retry < MAX_RETRY =>
                         {
@@ -144,8 +149,14 @@ impl RedisClusterActor {
                             let _slot = values.next().unwrap();
                             let addr = values.next().unwrap().to_string();
 
-                            ctx.wait(this.refresh_slots());
-                            this.dispatch(slot, Some(addr), req, retry + 1)
+                            ctx.spawn(this.dispatch(
+                                slot,
+                                Some(addr),
+                                req,
+                                retry + 1,
+                                sender,
+                            ));
+                            ctx.spawn(this.refresh_slots());
                         }
                         Ok(Ok(RespValue::Error(ref e)))
                             if e.starts_with("ASK") && retry < MAX_RETRY =>
@@ -161,6 +172,7 @@ impl RedisClusterActor {
                             let _slot = values.next().unwrap();
                             let addr = values.next().unwrap().to_string();
 
+                            let (asking_sender, asking_receiver) = oneshot::channel();
                             ctx.spawn(
                                 // No retry for ASKING
                                 this.dispatch(
@@ -168,37 +180,77 @@ impl RedisClusterActor {
                                     Some(addr.clone()),
                                     Asking.serialize(),
                                     MAX_RETRY,
-                                )
-                                .map(
-                                    |res, _this, _ctx| {
-                                        match res.map(Asking::deserialize) {
-                                            Ok(Ok(())) => {}
-                                            e => {
-                                                warn!("failed to issue ASKING: {:?}", e)
-                                            }
-                                        };
-                                    },
+                                    asking_sender,
                                 ),
                             );
-                            this.dispatch(slot, Some(addr), req, retry + 1)
+                            ctx.spawn(asking_receiver.into_actor(this).then(
+                                move |res, this, _ctx| {
+                                    match res.map(|res| res.map(Asking::deserialize)) {
+                                        Ok(Ok(Ok(()))) => this.dispatch(
+                                            slot,
+                                            Some(addr),
+                                            req,
+                                            retry + 1,
+                                            sender,
+                                        ),
+                                        e => {
+                                            warn!("failed to issue ASKING: {:?}", e);
+
+                                            // If the ASKING issue fails, it is likely that the
+                                            // Redis cluster is not yet stable. In this case, there
+                                            // is nothing to be done but to try again.
+                                            this.dispatch(
+                                                slot,
+                                                None,
+                                                req,
+                                                retry + 1,
+                                                sender,
+                                            )
+                                        }
+                                    }
+                                },
+                            ));
                         }
+                        // The client also retries when it loses the connection to the Redis node
+                        // (e.g., in the case of resharding). In this case, since the correct
+                        // destination is not known, it waits for the slot information to be
+                        // updated before redirecting.
                         Ok(Err(Error::NotConnected)) if retry < MAX_RETRY => {
                             warn!("redis node is not connected");
                             this.connections.clear();
-                            ctx.wait(this.refresh_slots());
-                            this.dispatch(slot, None, req, retry + 1)
+                            ctx.wait(this.refresh_slots().map(move |(), this, ctx| {
+                                ctx.spawn(this.dispatch(
+                                    slot,
+                                    None,
+                                    req,
+                                    retry + 1,
+                                    sender,
+                                ));
+                            }));
                         }
                         Ok(Ok(RespValue::Error(ref e)))
                             if e.starts_with("CLUSTERDOWN") && retry < MAX_RETRY =>
                         {
                             warn!("redis cluster is down: {:?}", e);
                             this.connections.clear();
-                            ctx.wait(this.refresh_slots());
-                            this.dispatch(slot, None, req, retry + 1)
+                            ctx.wait(this.refresh_slots().map(move |(), this, ctx| {
+                                ctx.spawn(this.dispatch(
+                                    slot,
+                                    None,
+                                    req,
+                                    retry + 1,
+                                    sender,
+                                ));
+                            }));
                         }
-                        Ok(Ok(res)) => Box::pin(ok(res)),
-                        Ok(Err(e)) => Box::pin(err(e)),
-                        Err(_canceled) => Box::pin(err(Error::Disconnected)),
+                        // Succeeded
+                        Ok(res) => {
+                            let _ = sender.send(res);
+                        }
+                        // Redis Actor is down
+                        Err(_canceled) => {
+                            let _ = sender.send(Err(Error::Disconnected));
+                        }
                     }
                 }),
         )
@@ -226,21 +278,26 @@ where
         + Message<Result = Result<<T as RedisCommand>::Output, Error>>,
     T::Output: Send + 'static,
 {
-    type Result = ResponseActFuture<RedisClusterActor, Result<T::Output, Error>>;
+    type Result = ResponseFuture<Result<T::Output, Error>>;
 
-    fn handle(&mut self, msg: T, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: T, ctx: &mut Self::Context) -> Self::Result {
         // refuse operations over multiple slots
         let slot = match msg.slot() {
             Ok(slot) => slot,
-            Err(e) => return Box::pin(actix::fut::err(Error::DifferentSlots(e))),
+            Err(e) => {
+                return Box::pin(futures_util::future::err(Error::DifferentSlots(e)))
+            }
         };
         let req = msg.serialize();
 
-        Box::pin(self.dispatch(slot, None, req, 0).map(|res, _this, _ctx| {
+        let (sender, receiver) = oneshot::channel();
+        ctx.spawn(self.dispatch(slot, None, req, 0, sender));
+        Box::pin(receiver.map(|res| {
             match res {
-                Ok(res) => T::deserialize(res)
+                Ok(Ok(res)) => T::deserialize(res)
                     .map_err(|e| Error::Redis(RespError::RESP(e.message, e.resp))),
-                Err(e) => Err(e),
+                Ok(Err(e)) => Err(e),
+                Err(_canceled) => Err(Error::Disconnected),
             }
         }))
     }
