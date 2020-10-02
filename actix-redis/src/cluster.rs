@@ -15,7 +15,7 @@ const MAX_RETRY: usize = 16;
 struct DebugResp<'a>(&'a RespValue);
 
 impl std::fmt::Debug for DebugResp<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             RespValue::Nil => write!(f, "nil"),
             RespValue::Integer(n) => write!(f, "{:?}", n),

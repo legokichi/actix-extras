@@ -6,6 +6,9 @@
 //! * [Chat on gitter](https://gitter.im/actix/actix)
 //! * Cargo package: [actix-redis](https://crates.io/crates/actix-redis)
 //! * Minimum supported Rust version: 1.40.0 or later
+
+#![deny(rust_2018_idioms)]
+
 mod cluster;
 pub mod command;
 mod redis;
