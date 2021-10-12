@@ -307,7 +307,6 @@ impl Session {
 impl FromRequest for Session {
     type Error = Error;
     type Future = Ready<Result<Session, Error>>;
-    type Config = ();
 
     #[inline]
     fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {

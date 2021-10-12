@@ -1,8 +1,8 @@
 use actix::prelude::*;
-use actix_utils::oneshot;
-use futures_util::future::FutureExt;
+use futures::future::FutureExt;
 use log::{debug, info, warn};
 use redis_async::resp::RespValue;
+use tokio::sync::oneshot;
 
 use std::collections::HashMap;
 
@@ -19,9 +19,7 @@ impl std::fmt::Debug for DebugResp<'_> {
         match self.0 {
             RespValue::Nil => write!(f, "nil"),
             RespValue::Integer(n) => write!(f, "{:?}", n),
-            RespValue::Array(o) => {
-                f.debug_list().entries(o.iter().map(DebugResp)).finish()
-            }
+            RespValue::Array(o) => f.debug_list().entries(o.iter().map(DebugResp)).finish(),
             RespValue::SimpleString(s) => write!(f, "{:?}", s),
             RespValue::BulkString(s) => write!(f, "{:?}", String::from_utf8_lossy(s)),
             RespValue::Error(e) => write!(f, "{:?}", e),
@@ -67,9 +65,7 @@ impl RedisClusterActor {
                         for slots in slots.iter() {
                             this.connections
                                 .entry(slots.master_addr().to_string())
-                                .or_insert_with(|| {
-                                    RedisActor::start(slots.master_addr())
-                                });
+                                .or_insert_with(|| RedisActor::start(slots.master_addr()));
                         }
                         this.slots = slots;
                         debug!("slots: {:?}", this.slots);
@@ -149,13 +145,7 @@ impl RedisClusterActor {
                             let _slot = values.next().unwrap();
                             let addr = values.next().unwrap().to_string();
 
-                            ctx.spawn(this.dispatch(
-                                slot,
-                                Some(addr),
-                                req,
-                                retry + 1,
-                                sender,
-                            ));
+                            ctx.spawn(this.dispatch(slot, Some(addr), req, retry + 1, sender));
                             ctx.spawn(this.refresh_slots());
                         }
                         Ok(Ok(RespValue::Error(ref e)))
@@ -186,26 +176,16 @@ impl RedisClusterActor {
                             ctx.spawn(asking_receiver.into_actor(this).then(
                                 move |res, this, _ctx| {
                                     match res.map(|res| res.map(Asking::deserialize)) {
-                                        Ok(Ok(Ok(()))) => this.dispatch(
-                                            slot,
-                                            Some(addr),
-                                            req,
-                                            retry + 1,
-                                            sender,
-                                        ),
+                                        Ok(Ok(Ok(()))) => {
+                                            this.dispatch(slot, Some(addr), req, retry + 1, sender)
+                                        }
                                         e => {
                                             warn!("failed to issue ASKING: {:?}", e);
 
                                             // If the ASKING issue fails, it is likely that the
                                             // Redis cluster is not yet stable. In this case, there
                                             // is nothing to be done but to try again.
-                                            this.dispatch(
-                                                slot,
-                                                None,
-                                                req,
-                                                retry + 1,
-                                                sender,
-                                            )
+                                            this.dispatch(slot, None, req, retry + 1, sender)
                                         }
                                     }
                                 },
@@ -219,13 +199,7 @@ impl RedisClusterActor {
                             warn!("redis node is not connected");
                             this.connections.clear();
                             ctx.wait(this.refresh_slots().map(move |(), this, ctx| {
-                                ctx.spawn(this.dispatch(
-                                    slot,
-                                    None,
-                                    req,
-                                    retry + 1,
-                                    sender,
-                                ));
+                                ctx.spawn(this.dispatch(slot, None, req, retry + 1, sender));
                             }));
                         }
                         Ok(Ok(RespValue::Error(ref e)))
@@ -234,13 +208,7 @@ impl RedisClusterActor {
                             warn!("redis cluster is down: {:?}", e);
                             this.connections.clear();
                             ctx.wait(this.refresh_slots().map(move |(), this, ctx| {
-                                ctx.spawn(this.dispatch(
-                                    slot,
-                                    None,
-                                    req,
-                                    retry + 1,
-                                    sender,
-                                ));
+                                ctx.spawn(this.dispatch(slot, None, req, retry + 1, sender));
                             }));
                         }
                         // Succeeded
@@ -274,8 +242,7 @@ impl Supervised for RedisClusterActor {
 
 impl<T> Handler<T> for RedisClusterActor
 where
-    T: RedisClusterCommand
-        + Message<Result = Result<<T as RedisCommand>::Output, Error>>,
+    T: RedisClusterCommand + Message<Result = Result<<T as RedisCommand>::Output, Error>>,
     T::Output: Send + 'static,
 {
     type Result = ResponseFuture<Result<T::Output, Error>>;
@@ -284,21 +251,18 @@ where
         // refuse operations over multiple slots
         let slot = match msg.slot() {
             Ok(slot) => slot,
-            Err(e) => {
-                return Box::pin(futures_util::future::err(Error::DifferentSlots(e)))
-            }
+            Err(e) => return Box::pin(async { Err(Error::DifferentSlots(e)) }),
         };
         let req = msg.serialize();
 
         let (sender, receiver) = oneshot::channel();
         ctx.spawn(self.dispatch(slot, None, req, 0, sender));
-        Box::pin(receiver.map(|res| {
-            match res {
-                Ok(Ok(res)) => T::deserialize(res)
-                    .map_err(|e| Error::Redis(RespError::RESP(e.message, e.resp))),
-                Ok(Err(e)) => Err(e),
-                Err(_canceled) => Err(Error::Disconnected),
+        Box::pin(receiver.map(|res| match res {
+            Ok(Ok(res)) => {
+                T::deserialize(res).map_err(|e| Error::Redis(RespError::RESP(e.message, e.resp)))
             }
+            Ok(Err(e)) => Err(e),
+            Err(_canceled) => Err(Error::Disconnected),
         }))
     }
 }

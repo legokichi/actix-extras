@@ -29,6 +29,7 @@ impl RedisCommand for Get {
     fn deserialize(resp: RespValue) -> Result<Self::Output, DeserializeError> {
         match resp {
             Nil => Ok(None),
+            SimpleString(s) => Ok(Some(s.into_bytes())),
             BulkString(s) => Ok(Some(s)),
             resp => Err(DeserializeError::new("invalid response to GET", resp)),
         }

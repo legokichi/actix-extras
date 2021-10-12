@@ -1,15 +1,15 @@
-use std::collections::VecDeque;
-use std::io;
-
 use actix::prelude::*;
 use actix_rt::net::TcpStream;
-use actix_service::boxed::{service, BoxService};
-use actix_tls::connect::{default_connector, Connect, ConnectError, Connection};
+use actix_service::Service;
+use actix_tls::connect::{ConnectInfo, Connector, ConnectorService};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
+use futures::FutureExt;
 use log::{error, info, warn};
 use redis_async::error::Error as RespError;
 use redis_async::resp::{RespCodec, RespValue};
+use std::collections::VecDeque;
+use std::io;
 use tokio::io::{split, WriteHalf};
 use tokio::sync::oneshot;
 use tokio_util::codec::FramedRead;
@@ -28,7 +28,7 @@ impl Message for Command {
 /// Redis communication actor
 pub struct RedisActor {
     addr: String,
-    connector: BoxService<Connect<String>, Connection<String, TcpStream>, ConnectError>,
+    connector: ConnectorService,
     backoff: ExponentialBackoff,
     cell: Option<actix::io::FramedWrite<RespValue, WriteHalf<TcpStream>, RespCodec>>,
     queue: VecDeque<oneshot::Sender<Result<RespValue, Error>>>,
@@ -46,7 +46,7 @@ impl RedisActor {
 
         Supervisor::start(|_| RedisActor {
             addr,
-            connector: service(default_connector()),
+            connector: Connector::default().service(),
             cell: None,
             backoff,
             queue: VecDeque::new(),
@@ -58,7 +58,7 @@ impl Actor for RedisActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
-        let req = Connect::new(self.addr.to_owned());
+        let req = ConnectInfo::new(self.addr.to_owned());
         self.connector
             .call(req)
             .into_actor(self)

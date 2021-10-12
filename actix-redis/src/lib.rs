@@ -25,7 +25,7 @@ pub enum Error {
     #[display(fmt = "Redis error {}", _0)]
     Redis(redis_async::error::Error),
     #[display(fmt = "Redis Cluster: Different slots")]
-    DifferentSlots(Vec<u16>),
+    DifferentSlots(#[error(not(source))] Vec<u16>),
     /// Receiving message during reconnecting
     #[display(fmt = "Redis: Not connected")]
     NotConnected,
