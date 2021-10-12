@@ -1,17 +1,17 @@
 use std::collections::VecDeque;
 use std::io;
 
-use actix::actors::resolver::{Connect, Resolver};
 use actix::prelude::*;
-use actix_utils::oneshot;
+use actix_rt::net::TcpStream;
+use actix_service::boxed::{service, BoxService};
+use actix_tls::connect::{default_connector, Connect, ConnectError, Connection};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
-use futures_util::FutureExt;
 use log::{error, info, warn};
 use redis_async::error::Error as RespError;
 use redis_async::resp::{RespCodec, RespValue};
 use tokio::io::{split, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio_util::codec::FramedRead;
 
 use crate::command::RedisCommand;
@@ -25,9 +25,10 @@ impl Message for Command {
     type Result = Result<RespValue, Error>;
 }
 
-/// Redis comminucation actor
+/// Redis communication actor
 pub struct RedisActor {
     addr: String,
+    connector: BoxService<Connect<String>, Connection<String, TcpStream>, ConnectError>,
     backoff: ExponentialBackoff,
     cell: Option<actix::io::FramedWrite<RespValue, WriteHalf<TcpStream>, RespCodec>>,
     queue: VecDeque<oneshot::Sender<Result<RespValue, Error>>>,
@@ -38,11 +39,14 @@ impl RedisActor {
     pub fn start<S: Into<String>>(addr: S) -> Addr<RedisActor> {
         let addr = addr.into();
 
-        let mut backoff = ExponentialBackoff::default();
-        backoff.max_elapsed_time = None;
+        let backoff = ExponentialBackoff {
+            max_elapsed_time: None,
+            ..Default::default()
+        };
 
         Supervisor::start(|_| RedisActor {
             addr,
+            connector: service(default_connector()),
             cell: None,
             backoff,
             queue: VecDeque::new(),
@@ -54,34 +58,26 @@ impl Actor for RedisActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
-        Resolver::from_registry()
-            .send(Connect::host(self.addr.as_str()))
+        let req = Connect::new(self.addr.to_owned());
+        self.connector
+            .call(req)
             .into_actor(self)
             .map(|res, act, ctx| match res {
-                Ok(res) => match res {
-                    Ok(stream) => {
-                        info!("Connected to redis server: {}", act.addr);
+                Ok(conn) => {
+                    let stream = conn.into_parts().0;
+                    info!("Connected to redis server: {}", act.addr);
 
-                        let (r, w) = split(stream);
+                    let (r, w) = split(stream);
 
-                        // configure write side of the connection
-                        let framed = actix::io::FramedWrite::new(w, RespCodec, ctx);
-                        act.cell = Some(framed);
+                    // configure write side of the connection
+                    let framed = actix::io::FramedWrite::new(w, RespCodec, ctx);
+                    act.cell = Some(framed);
 
-                        // read side of the connection
-                        ctx.add_stream(FramedRead::new(r, RespCodec));
+                    // read side of the connection
+                    ctx.add_stream(FramedRead::new(r, RespCodec));
 
-                        act.backoff.reset();
-                    }
-                    Err(err) => {
-                        error!("Can not connect to redis server({}): {}", act.addr, err);
-                        // re-connect with backoff time.
-                        // we stop current context, supervisor will restart it.
-                        if let Some(timeout) = act.backoff.next_backoff() {
-                            ctx.run_later(timeout, |_, ctx| ctx.stop());
-                        }
-                    }
-                },
+                    act.backoff.reset();
+                }
                 Err(err) => {
                     error!("Can not connect to redis server({}): {}", act.addr, err);
                     // re-connect with backoff time.
@@ -141,10 +137,7 @@ impl Handler<Command> for RedisActor {
             let _ = tx.send(Err(Error::NotConnected));
         }
 
-        Box::pin(rx.map(|res| match res {
-            Ok(res) => res,
-            Err(_) => Err(Error::Disconnected),
-        }))
+        Box::pin(async move { rx.await.map_err(|_| Error::Disconnected)? })
     }
 }
 

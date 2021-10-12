@@ -1,6 +1,22 @@
 # Changes
 
 ## Unreleased - 2020-xx-xx
+* Minimum supported Rust version (MSRV) is now 1.51.
+
+
+## 0.6.0-beta.2 - 2020-06-27
+* No notable changes.
+
+
+## 0.6.0-beta.1 - 2020-04-02
+* Update `actix-web` dependency to 4.0.0 beta.
+* Minimum supported Rust version (MSRV) is now 1.46.0.
+
+
+## 0.5.1 - 2020-03-21
+* Correct error handling when extracting auth details from request. [#128]
+
+[#128]: https://github.com/actix/actix-extras/pull/128
 
 
 ## 0.5.0 - 2020-09-11

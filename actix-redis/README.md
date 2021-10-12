@@ -1,21 +1,19 @@
 # actix-redis
 
-[![crates.io](https://img.shields.io/crates/v/actix-redis)](https://crates.io/crates/actix-redis)
-[![Documentation](https://docs.rs/actix-redis/badge.svg)](https://docs.rs/actix-redis)
-[![Dependency Status](https://deps.rs/crate/actix-redis/0.8.1/status.svg)](https://deps.rs/crate/actix-redis/0.8.1)
+> Redis integration for Actix and session store for Actix Web.
+
+[![crates.io](https://img.shields.io/crates/v/actix-redis?label=latest)](https://crates.io/crates/actix-redis)
+[![Documentation](https://docs.rs/actix-redis/badge.svg?version=0.10.0-beta.2)](https://docs.rs/actix-redis/0.10.0-beta.2)
 ![Apache 2.0 or MIT licensed](https://img.shields.io/crates/l/actix-redis)
-[![Join the chat at https://gitter.im/actix/actix](https://badges.gitter.im/actix/actix.svg)](https://gitter.im/actix/actix?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+[![Dependency Status](https://deps.rs/crate/actix-redis/0.10.0-beta.2/status.svg)](https://deps.rs/crate/actix-redis/0.10.0-beta.2)
 
-> Redis integration for actix framework.
+## Documentation & Resources
 
-## Documentation
+- [API Documentation](https://docs.rs/actix-redis)
+- [Example Project](https://github.com/actix/examples/tree/HEAD/session/redis-session)
+- Minimum Supported Rust Version (MSRV): 1.51
 
-* [API Documentation](https://actix.rs/actix-extras/actix_redis/)
-* [Chat on gitter](https://gitter.im/actix/actix)
-* Cargo package: [actix-redis](https://crates.io/crates/actix-redis)
-* Minimum supported Rust version: 1.40 or later
-
-## Redis session backend
+## Redis Session Backend
 
 Use redis as session storage.
 
@@ -28,39 +26,22 @@ Note that whatever you write into your session is visible by the user (but not m
 Constructor panics if key length is less than 32 bytes.
 
 ```rust
-use actix_web::{App, HttpServer, web, middleware};
-use actix_web::middleware::session::SessionStorage;
+use actix_web::{App, HttpServer, middleware::Logger};
+use actix_web::web::{resource, get}
 use actix_redis::RedisSession;
 
-#[actix_rt::main]
-async fn main() -> std::io::Result {
-    HttpServer::new(|| App::new()
-        // enable logger
-        .middleware(middleware::Logger::default())
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(move || App::new()
         // cookie session middleware
-        .middleware(SessionStorage::new(
-            RedisSession::new("127.0.0.1:6379", &[0; 32])
-        ))
+        .wrap(RedisSession::new("127.0.0.1:6379", &[0; 32]))
+        // enable logger
+        .wrap(Logger::default())
         // register simple route, handle all methods
-        .service(web::resource("/").to(index))
+        .service(resource("/").route(get().to(index)))
     )
-    .bind("0.0.0.0:8080")?
-    .start()
+    .bind("127.0.0.1:8080")?
+    .run()
     .await
 }
 ```
-
-## License
-
-This project is licensed under either of
-
-* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or [https://www.apache.org/licenses/LICENSE-2.0](https://www.apache.org/licenses/LICENSE-2.0))
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or [https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT))
-
-at your option.
-
-## Code of Conduct
-
-Contribution to the actix-redis crate is organized under the terms of the
-Contributor Covenant, the maintainer of actix-redis, @fafhrd91, promises to
-intervene to uphold that code of conduct.

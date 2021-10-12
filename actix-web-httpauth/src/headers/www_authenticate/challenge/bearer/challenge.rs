@@ -3,7 +3,7 @@ use std::fmt;
 use std::str;
 
 use actix_web::http::header::{HeaderValue, IntoHeaderValue, InvalidHeaderValue};
-use bytes::{BufMut, Bytes, BytesMut};
+use actix_web::web::{BufMut, Bytes, BytesMut};
 
 use super::super::Challenge;
 use super::{BearerBuilder, Error};
@@ -31,7 +31,7 @@ use crate::utils;
 ///         .finish();
 ///
 ///     HttpResponse::Unauthorized()
-///         .set(WwwAuthenticate(challenge))
+///         .insert_header(WwwAuthenticate(challenge))
 ///         .finish()
 /// }
 /// ```
@@ -133,7 +133,7 @@ impl fmt::Display for Bearer {
 impl IntoHeaderValue for Bearer {
     type Error = InvalidHeaderValue;
 
-    fn try_into(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
+    fn try_into_value(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
         HeaderValue::from_maybe_shared(self.to_bytes())
     }
 }

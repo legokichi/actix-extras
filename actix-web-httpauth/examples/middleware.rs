@@ -4,14 +4,11 @@ use actix_web::{middleware, web, App, Error, HttpServer};
 use actix_web_httpauth::extractors::basic::BasicAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
 
-async fn validator(
-    req: ServiceRequest,
-    _credentials: BasicAuth,
-) -> Result<ServiceRequest, Error> {
+async fn validator(req: ServiceRequest, _credentials: BasicAuth) -> Result<ServiceRequest, Error> {
     Ok(req)
 }
 
-#[actix_rt::main]
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         let auth = HttpAuthentication::basic(validator);

@@ -3,7 +3,7 @@ use std::fmt;
 use std::str;
 
 use actix_web::http::header::{HeaderValue, IntoHeaderValue, InvalidHeaderValue};
-use bytes::{BufMut, BytesMut};
+use actix_web::web::{BufMut, BytesMut};
 
 use crate::headers::authorization::errors::ParseError;
 use crate::headers::authorization::Scheme;
@@ -97,7 +97,7 @@ impl fmt::Display for Basic {
 impl IntoHeaderValue for Basic {
     type Error = InvalidHeaderValue;
 
-    fn try_into(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
+    fn try_into_value(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
         let mut credentials = BytesMut::with_capacity(
             self.user_id.len()
                 + 1 // ':'
@@ -115,7 +115,7 @@ impl IntoHeaderValue for Basic {
         let encoded = base64::encode(&credentials);
         let mut value = BytesMut::with_capacity(6 + encoded.len());
         value.put(&b"Basic "[..]);
-        value.put(&encoded.as_bytes()[..]);
+        value.put(encoded.as_bytes());
 
         HeaderValue::from_maybe_shared(value.freeze())
     }
@@ -187,7 +187,7 @@ mod tests {
             password: Some("open sesame".into()),
         };
 
-        let result = basic.try_into();
+        let result = basic.try_into_value();
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),

@@ -1,7 +1,7 @@
 use actix_redis::RedisSession;
 use actix_session::Session;
 use actix_web::{
-    cookie, middleware, web, App, Error, HttpResponse, HttpServer, Responder,
+    cookie, error::InternalError, middleware, web, App, Error, HttpResponse, HttpServer, Responder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +19,7 @@ struct User {
 }
 
 impl User {
-    fn authenticate(credentials: Credentials) -> Result<Self, actix_http::Response> {
+    fn authenticate(credentials: Credentials) -> Result<Self, HttpResponse> {
         // TODO: figure out why I keep getting hacked
         if &credentials.password != "hunter2" {
             return Err(HttpResponse::Unauthorized().json("Unauthorized"));
@@ -33,7 +33,7 @@ impl User {
     }
 }
 
-pub fn validate_session(session: &Session) -> Result<i64, actix_http::Response> {
+pub fn validate_session(session: &Session) -> Result<i64, HttpResponse> {
     let user_id: Option<i64> = session.get("user_id").unwrap_or(None);
 
     match user_id {
@@ -49,12 +49,12 @@ pub fn validate_session(session: &Session) -> Result<i64, actix_http::Response> 
 async fn login(
     credentials: web::Json<Credentials>,
     session: Session,
-) -> Result<impl Responder, actix_http::Response> {
+) -> Result<impl Responder, Error> {
     let credentials = credentials.into_inner();
 
     match User::authenticate(credentials) {
-        Ok(user) => session.set("user_id", user.id).unwrap(),
-        Err(_) => return Err(HttpResponse::Unauthorized().json("Unauthorized")),
+        Ok(user) => session.insert("user_id", user.id).unwrap(),
+        Err(err) => return Err(InternalError::from_response("", err).into()),
     };
 
     Ok("Welcome!")
@@ -63,7 +63,7 @@ async fn login(
 /// some protected resource
 async fn secret(session: Session) -> Result<impl Responder, Error> {
     // only allow access to this resource if the user has an active session
-    validate_session(&session)?;
+    validate_session(&session).map_err(|err| InternalError::from_response("", err))?;
 
     Ok("secret revealed")
 }

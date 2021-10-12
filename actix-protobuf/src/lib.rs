@@ -1,39 +1,47 @@
-#![deny(rust_2018_idioms)]
+#![forbid(unsafe_code)]
+#![deny(rust_2018_idioms, nonstandard_style)]
 
+use std::{
+    fmt,
+    future::Future,
+    ops::{Deref, DerefMut},
+    pin::Pin,
+    task::{self, Poll},
+};
+
+use actix_web::{
+    dev::Payload,
+    error::PayloadError,
+    http::header::{CONTENT_LENGTH, CONTENT_TYPE},
+    web::BytesMut,
+    Error, FromRequest, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, Responder,
+    ResponseError,
+};
 use derive_more::Display;
-use std::fmt;
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::task;
-use std::task::Poll;
-
-use bytes::BytesMut;
-use prost::DecodeError as ProtoBufDecodeError;
-use prost::EncodeError as ProtoBufEncodeError;
-use prost::Message;
-
-use actix_web::dev::{HttpResponseBuilder, Payload};
-use actix_web::error::{Error, PayloadError, ResponseError};
-use actix_web::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use actix_web::{FromRequest, HttpMessage, HttpRequest, HttpResponse, Responder};
-use futures_util::future::{ready, FutureExt, LocalBoxFuture, Ready};
-use futures_util::StreamExt;
+use futures_util::{
+    future::{FutureExt as _, LocalBoxFuture},
+    stream::StreamExt as _,
+};
+use prost::{DecodeError as ProtoBufDecodeError, EncodeError as ProtoBufEncodeError, Message};
 
 #[derive(Debug, Display)]
 pub enum ProtoBufPayloadError {
     /// Payload size is bigger than 256k
     #[display(fmt = "Payload size is bigger than 256k")]
     Overflow,
+
     /// Content type error
     #[display(fmt = "Content type error")]
     ContentType,
+
     /// Serialize error
     #[display(fmt = "ProtoBuf serialize error: {}", _0)]
     Serialize(ProtoBufEncodeError),
+
     /// Deserialize error
     #[display(fmt = "ProtoBuf deserialize error: {}", _0)]
     Deserialize(ProtoBufDecodeError),
+
     /// Payload error
     #[display(fmt = "Error that occur during reading payload: {}", _0)]
     Payload(PayloadError),
@@ -137,21 +145,14 @@ where
 }
 
 impl<T: Message + Default> Responder for ProtoBuf<T> {
-    type Error = Error;
-    type Future = Ready<Result<HttpResponse, Error>>;
-
-    fn respond_to(self, _: &HttpRequest) -> Self::Future {
+    fn respond_to(self, _: &HttpRequest) -> HttpResponse {
         let mut buf = Vec::new();
-        ready(
-            self.0
-                .encode(&mut buf)
-                .map_err(|e| Error::from(ProtoBufPayloadError::Serialize(e)))
-                .map(|()| {
-                    HttpResponse::Ok()
-                        .content_type("application/protobuf")
-                        .body(buf)
-                }),
-        )
+        match self.0.encode(&mut buf) {
+            Ok(()) => HttpResponse::Ok()
+                .content_type("application/protobuf")
+                .body(buf),
+            Err(err) => HttpResponse::from_error(Error::from(ProtoBufPayloadError::Serialize(err))),
+        }
     }
 }
 
@@ -204,10 +205,7 @@ impl<T: Message + Default> ProtoBufMessage<T> {
 impl<T: Message + Default + 'static> Future for ProtoBufMessage<T> {
     type Output = Result<T, ProtoBufPayloadError>;
 
-    fn poll(
-        mut self: Pin<&mut Self>,
-        task: &mut task::Context<'_>,
-    ) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, task: &mut task::Context<'_>) -> Poll<Self::Output> {
         if let Some(ref mut fut) = self.fut {
             return Pin::new(fut).poll(task);
         }
@@ -255,7 +253,7 @@ pub trait ProtoBufResponseBuilder {
 
 impl ProtoBufResponseBuilder for HttpResponseBuilder {
     fn protobuf<T: Message>(&mut self, value: T) -> Result<HttpResponse, Error> {
-        self.header(CONTENT_TYPE, "application/protobuf");
+        self.insert_header((CONTENT_TYPE, "application/protobuf"));
 
         let mut body = Vec::new();
         value
@@ -301,10 +299,8 @@ mod tests {
         });
         let req = TestRequest::default().to_http_request();
         let resp = protobuf.respond_to(&req).await.unwrap();
-        assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap(),
-            "application/protobuf"
-        );
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
+        assert_eq!(ct, "application/protobuf");
     }
 
     #[actix_rt::test]
@@ -313,16 +309,16 @@ mod tests {
         let protobuf = ProtoBufMessage::<MyObject>::new(&req, &mut pl).await;
         assert_eq!(protobuf.err().unwrap(), ProtoBufPayloadError::ContentType);
 
-        let (req, mut pl) =
-            TestRequest::with_header(header::CONTENT_TYPE, "application/text")
-                .to_http_parts();
+        let (req, mut pl) = TestRequest::get()
+            .insert_header((header::CONTENT_TYPE, "application/text"))
+            .to_http_parts();
         let protobuf = ProtoBufMessage::<MyObject>::new(&req, &mut pl).await;
         assert_eq!(protobuf.err().unwrap(), ProtoBufPayloadError::ContentType);
 
-        let (req, mut pl) =
-            TestRequest::with_header(header::CONTENT_TYPE, "application/protobuf")
-                .header(header::CONTENT_LENGTH, "10000")
-                .to_http_parts();
+        let (req, mut pl) = TestRequest::get()
+            .insert_header((header::CONTENT_TYPE, "application/protobuf"))
+            .insert_header((header::CONTENT_LENGTH, "10000"))
+            .to_http_parts();
         let protobuf = ProtoBufMessage::<MyObject>::new(&req, &mut pl)
             .limit(100)
             .await;

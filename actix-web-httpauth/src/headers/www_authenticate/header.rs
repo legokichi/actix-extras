@@ -1,7 +1,5 @@
 use actix_web::error::ParseError;
-use actix_web::http::header::{
-    Header, HeaderName, HeaderValue, IntoHeaderValue, WWW_AUTHENTICATE,
-};
+use actix_web::http::header::{Header, HeaderName, HeaderValue, IntoHeaderValue, WWW_AUTHENTICATE};
 use actix_web::HttpMessage;
 
 use super::Challenge;
@@ -27,7 +25,7 @@ impl<C: Challenge> Header for WwwAuthenticate<C> {
 impl<C: Challenge> IntoHeaderValue for WwwAuthenticate<C> {
     type Error = <C as IntoHeaderValue>::Error;
 
-    fn try_into(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
-        self.0.try_into()
+    fn try_into_value(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
+        self.0.try_into_value()
     }
 }

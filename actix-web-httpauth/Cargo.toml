@@ -1,16 +1,14 @@
 [package]
 name = "actix-web-httpauth"
-version = "0.5.0"
+version = "0.6.0-beta.2"
 authors = [
     "svartalf <self@svartalf.info>",
     "Yuki Okushi <huyuumi.dev@gmail.com>",
 ]
 description = "HTTP authentication schemes for Actix web"
-readme = "README.md"
 keywords = ["http", "web", "framework", "authentication", "security"]
-homepage = "https://github.com/actix/actix-extras"
-repository = "https://github.com/actix/actix-extras.git"
-documentation = "https://docs.rs/actix-web-httpauth/"
+homepage = "https://actix.rs"
+repository = "https://github.com/actix/actix-extras"
 categories = ["web-programming::http-server"]
 license = "MIT OR Apache-2.0"
 edition = "2018"
@@ -20,11 +18,11 @@ name = "actix_web_httpauth"
 path = "src/lib.rs"
 
 [dependencies]
-actix-web = { version = "3.0.0", default_features = false }
-actix-service = "1.0.6"
-futures-util = { version = "0.3", default-features = false }
-bytes = "0.5"
-base64 = "0.12"
+actix-web = { version = "4.0.0-beta.8", default_features = false }
+actix-service = "2.0.0"
+base64 = "0.13"
+futures-util = { version = "0.3.7", default-features = false }
 
 [dev-dependencies]
-actix-rt = "1"
+actix-cors = "0.6.0-beta.2"
+actix-rt = "2"

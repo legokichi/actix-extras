@@ -1,9 +1,7 @@
 use std::fmt;
 
 use actix_web::error::ParseError;
-use actix_web::http::header::{
-    Header, HeaderName, HeaderValue, IntoHeaderValue, AUTHORIZATION,
-};
+use actix_web::http::header::{Header, HeaderName, HeaderValue, IntoHeaderValue, AUTHORIZATION};
 use actix_web::HttpMessage;
 
 use crate::headers::authorization::scheme::Scheme;
@@ -91,8 +89,8 @@ impl<S: Scheme> Header for Authorization<S> {
 impl<S: Scheme> IntoHeaderValue for Authorization<S> {
     type Error = <S as IntoHeaderValue>::Error;
 
-    fn try_into(self) -> Result<HeaderValue, <Self as IntoHeaderValue>::Error> {
-        self.0.try_into()
+    fn try_into_value(self) -> Result<HeaderValue, Self::Error> {
+        self.0.try_into_value()
     }
 }
 

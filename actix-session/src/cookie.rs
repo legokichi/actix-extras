@@ -1,42 +1,28 @@
-//! Cookie session.
-//!
-//! [**CookieSession**](struct.CookieSession.html)
-//! uses cookies as session storage. `CookieSession` creates sessions
-//! which are limited to storing fewer than 4000 bytes of data, as the payload
-//! must fit into a single cookie. An internal server error is generated if a
-//! session contains more than 4000 bytes.
-//!
-//! A cookie may have a security policy of *signed* or *private*. Each has
-//! a respective `CookieSession` constructor.
-//!
-//! A *signed* cookie may be viewed but not modified by the client. A *private*
-//! cookie may neither be viewed nor modified by the client.
-//!
-//! The constructors take a key as an argument. This is the private key
-//! for cookie session - when this value is changed, all session data is lost.
+//! Cookie based sessions. See docs for [`CookieSession`].
 
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::{collections::HashMap, error::Error as StdError, rc::Rc};
 
-use actix_service::{Service, Transform};
-use actix_web::cookie::{Cookie, CookieJar, Key, SameSite};
-use actix_web::dev::{ServiceRequest, ServiceResponse};
-use actix_web::http::{header::SET_COOKIE, HeaderValue};
-use actix_web::{Error, HttpMessage, ResponseError};
-use derive_more::{Display, From};
-use futures_util::future::{ok, FutureExt, LocalBoxFuture, Ready};
+use actix_web::{
+    body::{AnyBody, MessageBody},
+    cookie::{Cookie, CookieJar, Key, SameSite},
+    dev::{Service, ServiceRequest, ServiceResponse, Transform},
+    http::{header::SET_COOKIE, HeaderValue},
+    Error, ResponseError,
+};
+use derive_more::Display;
+use futures_util::future::{ok, FutureExt as _, LocalBoxFuture, Ready};
 use serde_json::error::Error as JsonError;
 use time::{Duration, OffsetDateTime};
 
 use crate::{Session, SessionStatus};
 
 /// Errors that can occur during handling cookie session
-#[derive(Debug, From, Display)]
+#[derive(Debug, Display)]
 pub enum CookieSessionError {
     /// Size of the serialized session is greater than 4000 bytes.
     #[display(fmt = "Size of the serialized session is greater than 4000 bytes.")]
     Overflow,
+
     /// Fail to serialize session.
     #[display(fmt = "Fail to serialize session")]
     Serialize(JsonError),
@@ -91,8 +77,8 @@ impl CookieSessionInner {
             return Ok(());
         }
 
-        let value =
-            serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
+        let value = serde_json::to_string(&state).map_err(CookieSessionError::Serialize)?;
+
         if value.len() > 4064 {
             return Err(CookieSessionError::Overflow.into());
         }
@@ -121,8 +107,8 @@ impl CookieSessionInner {
         let mut jar = CookieJar::new();
 
         match self.security {
-            CookieSecurity::Signed => jar.signed(&self.key).add(cookie),
-            CookieSecurity::Private => jar.private(&self.key).add(cookie),
+            CookieSecurity::Signed => jar.signed_mut(&self.key).add(cookie),
+            CookieSecurity::Private => jar.private_mut(&self.key).add(cookie),
         }
 
         for cookie in jar.delta() {
@@ -136,6 +122,7 @@ impl CookieSessionInner {
     /// invalidates session cookie
     fn remove_cookie<B>(&self, res: &mut ServiceResponse<B>) -> Result<(), Error> {
         let mut cookie = Cookie::named(self.name.clone());
+        cookie.set_path(self.path.clone());
         cookie.set_value("");
         cookie.set_max_age(Duration::zero());
         cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
@@ -155,10 +142,9 @@ impl CookieSessionInner {
 
                     let cookie_opt = match self.security {
                         CookieSecurity::Signed => jar.signed(&self.key).get(&self.name),
-                        CookieSecurity::Private => {
-                            jar.private(&self.key).get(&self.name)
-                        }
+                        CookieSecurity::Private => jar.private(&self.key).get(&self.name),
                     };
+
                     if let Some(cookie) = cookie_opt {
                         if let Ok(val) = serde_json::from_str(cookie.value()) {
                             return (false, val);
@@ -167,6 +153,7 @@ impl CookieSessionInner {
                 }
             }
         }
+
         (true, HashMap::new())
     }
 }
@@ -179,7 +166,7 @@ impl CookieSessionInner {
 /// than 4000 bytes.
 ///
 /// A cookie may have a security policy of *signed* or *private*. Each has a
-/// respective `CookieSessionBackend` constructor.
+/// respective `CookieSession` constructor.
 ///
 /// A *signed* cookie is stored on the client as plaintext alongside
 /// a signature such that the cookie may be viewed but not modified by the
@@ -197,9 +184,8 @@ impl CookieSessionInner {
 /// By default all cookies are percent encoded, but certain symbols may
 /// cause troubles when reading cookie, if they are not properly percent encoded.
 ///
-/// # Example
-///
-/// ```rust
+/// # Examples
+/// ```
 /// use actix_session::CookieSession;
 /// use actix_web::{web, App, HttpResponse, HttpServer};
 ///
@@ -214,7 +200,7 @@ impl CookieSessionInner {
 pub struct CookieSession(Rc<CookieSessionInner>);
 
 impl CookieSession {
-    /// Construct new *signed* `CookieSessionBackend` instance.
+    /// Construct new *signed* `CookieSession` instance.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn signed(key: &[u8]) -> CookieSession {
@@ -224,7 +210,7 @@ impl CookieSession {
         )))
     }
 
-    /// Construct new *private* `CookieSessionBackend` instance.
+    /// Construct new *private* `CookieSession` instance.
     ///
     /// Panics if key length is less than 32 bytes.
     pub fn private(key: &[u8]) -> CookieSession {
@@ -305,14 +291,15 @@ impl CookieSession {
     }
 }
 
-impl<S, B: 'static> Transform<S> for CookieSession
+impl<S, B> Transform<S, ServiceRequest> for CookieSession
 where
-    S: Service<Request = ServiceRequest, Response = ServiceResponse<B>>,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>>,
     S::Future: 'static,
     S::Error: 'static,
+    B: MessageBody + 'static,
+    B::Error: StdError,
 {
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse;
     type Error = S::Error;
     type InitError = ();
     type Transform = CookieSessionMiddleware<S>;
@@ -326,69 +313,71 @@ where
     }
 }
 
-/// Cookie session middleware
+/// Cookie based session middleware.
 pub struct CookieSessionMiddleware<S> {
     service: S,
     inner: Rc<CookieSessionInner>,
 }
 
-impl<S, B: 'static> Service for CookieSessionMiddleware<S>
+impl<S, B> Service<ServiceRequest> for CookieSessionMiddleware<S>
 where
-    S: Service<Request = ServiceRequest, Response = ServiceResponse<B>>,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>>,
     S::Future: 'static,
     S::Error: 'static,
+    B: MessageBody + 'static,
+    B::Error: StdError,
 {
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse;
     type Error = S::Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
+    actix_service::forward_ready!(service);
 
     /// On first request, a new session cookie is returned in response, regardless
     /// of whether any session state is set.  With subsequent requests, if the
     /// session state changes, then set-cookie is returned in response.  As
     /// a user logs out, call session.purge() to set SessionStatus accordingly
     /// and this will trigger removal of the session cookie in the response.
-    fn call(&mut self, mut req: ServiceRequest) -> Self::Future {
+    fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let inner = self.inner.clone();
         let (is_new, state) = self.inner.load(&req);
         let prolong_expiration = self.inner.expires_in.is_some();
-        Session::set_session(state, &mut req);
+        Session::set_session(&mut req, state);
 
         let fut = self.service.call(req);
 
         async move {
-            fut.await.map(|mut res| {
-                match Session::get_changes(&mut res) {
-                    (SessionStatus::Changed, Some(state))
-                    | (SessionStatus::Renewed, Some(state)) => {
-                        res.checked_expr(|res| inner.set_cookie(res, state))
-                    }
-                    (SessionStatus::Unchanged, Some(state)) if prolong_expiration => {
-                        res.checked_expr(|res| inner.set_cookie(res, state))
-                    }
-                    (SessionStatus::Unchanged, _) =>
-                    // set a new session cookie upon first request (new client)
-                    {
-                        if is_new {
-                            let state: HashMap<String, String> = HashMap::new();
-                            res.checked_expr(|res| {
-                                inner.set_cookie(res, state.into_iter())
-                            })
-                        } else {
-                            res
-                        }
-                    }
-                    (SessionStatus::Purged, _) => {
-                        let _ = inner.remove_cookie(&mut res);
-                        res
-                    }
-                    _ => res,
+            let mut res = fut.await?;
+
+            let result = match Session::get_changes(&mut res) {
+                (SessionStatus::Changed, state) | (SessionStatus::Renewed, state) => {
+                    inner.set_cookie(&mut res, state)
                 }
-            })
+
+                (SessionStatus::Unchanged, state) if prolong_expiration => {
+                    inner.set_cookie(&mut res, state)
+                }
+
+                // set a new session cookie upon first request (new client)
+                (SessionStatus::Unchanged, _) => {
+                    if is_new {
+                        let state: HashMap<String, String> = HashMap::new();
+                        inner.set_cookie(&mut res, state.into_iter())
+                    } else {
+                        Ok(())
+                    }
+                }
+
+                (SessionStatus::Purged, _) => {
+                    let _ = inner.remove_cookie(&mut res);
+                    Ok(())
+                }
+            };
+
+            match result {
+                Ok(()) => Ok(res.map_body(|_, body| AnyBody::from_message(body))),
+                Err(error) => Ok(res.error_response(error)),
+            }
         }
         .boxed_local()
     }
@@ -397,16 +386,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::web::Bytes;
     use actix_web::{test, web, App};
-    use bytes::Bytes;
 
     #[actix_rt::test]
     async fn cookie_session() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "test"
                 })),
         )
@@ -422,11 +411,11 @@ mod tests {
 
     #[actix_rt::test]
     async fn private_cookie() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::private(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "test"
                 })),
         )
@@ -442,11 +431,11 @@ mod tests {
 
     #[actix_rt::test]
     async fn lazy_cookie() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false).lazy(true))
                 .service(web::resource("/count").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "counting"
                 }))
                 .service(web::resource("/").to(|_ses: Session| async move { "test" })),
@@ -468,11 +457,11 @@ mod tests {
 
     #[actix_rt::test]
     async fn cookie_session_extractor() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false))
                 .service(web::resource("/").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "test"
                 })),
         )
@@ -488,7 +477,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn basics() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(
                     CookieSession::signed(&[0; 32])
@@ -500,7 +489,7 @@ mod tests {
                         .max_age(100),
                 )
                 .service(web::resource("/").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "test"
                 }))
                 .service(web::resource("/test/").to(|ses: Session| async move {
@@ -523,23 +512,20 @@ mod tests {
         let request = test::TestRequest::with_uri("/test/")
             .cookie(cookie)
             .to_request();
-        let body = test::read_response(&mut app, request).await;
+        let body = test::read_response(&app, request).await;
         assert_eq!(body, Bytes::from_static(b"counter: 100"));
     }
 
     #[actix_rt::test]
     async fn prolong_expiration() {
-        let mut app = test::init_service(
+        let app = test::init_service(
             App::new()
                 .wrap(CookieSession::signed(&[0; 32]).secure(false).expires_in(60))
                 .service(web::resource("/").to(|ses: Session| async move {
-                    let _ = ses.set("counter", 100);
+                    let _ = ses.insert("counter", 100);
                     "test"
                 }))
-                .service(
-                    web::resource("/test/")
-                        .to(|| async move { "no-changes-in-session" }),
-                ),
+                .service(web::resource("/test/").to(|| async move { "no-changes-in-session" })),
         )
         .await;
 
@@ -551,9 +537,11 @@ mod tests {
             .find(|c| c.name() == "actix-session")
             .expect("Cookie is set")
             .expires()
-            .expect("Expiration is set");
+            .expect("Expiration is set")
+            .datetime()
+            .expect("Expiration is a datetime");
 
-        actix_rt::time::delay_for(std::time::Duration::from_secs(1)).await;
+        actix_rt::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let request = test::TestRequest::with_uri("/test/").to_request();
         let response = app.call(request).await.unwrap();
@@ -563,7 +551,9 @@ mod tests {
             .find(|c| c.name() == "actix-session")
             .expect("Cookie is set")
             .expires()
-            .expect("Expiration is set");
+            .expect("Expiration is set")
+            .datetime()
+            .expect("Expiration is a datetime");
 
         assert!(expires_2 - expires_1 >= Duration::seconds(1));
     }

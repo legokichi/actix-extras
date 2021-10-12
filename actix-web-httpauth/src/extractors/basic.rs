@@ -81,7 +81,7 @@ impl AuthExtractorConfig for Config {
 ///
 /// fn main() {
 ///     let app = App::new()
-///         .data(Config::default().realm("Restricted area"))
+///         .app_data(Config::default().realm("Restricted area"))
 ///         .service(web::resource("/index.html").route(web::get().to(index)));
 /// }
 /// ```
@@ -94,7 +94,7 @@ pub struct BasicAuth(Basic);
 impl BasicAuth {
     /// Returns client's user-ID.
     pub fn user_id(&self) -> &Cow<'static, str> {
-        &self.0.user_id()
+        self.0.user_id()
     }
 
     /// Returns client's password.
@@ -108,10 +108,7 @@ impl FromRequest for BasicAuth {
     type Config = Config;
     type Error = AuthenticationError<Challenge>;
 
-    fn from_request(
-        req: &HttpRequest,
-        _: &mut Payload,
-    ) -> <Self as FromRequest>::Future {
+    fn from_request(req: &HttpRequest, _: &mut Payload) -> <Self as FromRequest>::Future {
         ready(
             Authorization::<Basic>::parse(req)
                 .map(|auth| BasicAuth(auth.into_scheme()))

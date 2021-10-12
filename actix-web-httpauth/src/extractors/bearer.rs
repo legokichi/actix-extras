@@ -84,7 +84,7 @@ impl AuthExtractorConfig for Config {
 ///
 /// fn main() {
 ///     let app = App::new()
-///         .data(
+///         .app_data(
 ///             Config::default()
 ///                 .realm("Restricted area")
 ///                 .scope("email photo"),
@@ -107,10 +107,7 @@ impl FromRequest for BearerAuth {
     type Future = Ready<Result<Self, Self::Error>>;
     type Error = AuthenticationError<bearer::Bearer>;
 
-    fn from_request(
-        req: &HttpRequest,
-        _payload: &mut Payload,
-    ) -> <Self as FromRequest>::Future {
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> <Self as FromRequest>::Future {
         ready(
             authorization::Authorization::<authorization::Bearer>::parse(req)
                 .map(|auth| BearerAuth(auth.into_scheme()))
