@@ -1,7 +1,7 @@
 use actix_redis::{command::*, RedisClusterActor};
 use std::fmt::Debug;
 use std::time::Duration;
-use tokio::time::delay_for;
+use tokio::time;
 
 fn success<T: Debug, E1: Debug, E2: Debug>(res: Result<Result<T, E1>, E2>) -> T {
     match res {
@@ -39,7 +39,7 @@ async fn test_cluster_scaledown() {
 
     // wait until the cluster agrees upon the promotion
     // 2 x cluster-node-timeout + 1 sec
-    delay_for(Duration::from_secs(3)).await;
+    time::sleep(Duration::from_secs(3)).await;
 
     // make sure that the client can access after the promotion
     assert_eq!(

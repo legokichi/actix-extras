@@ -83,7 +83,9 @@ impl RedisSession<RedisClusterActor> {
             http_only: Some(true),
         }))
     }
+}
 
+impl<R: Actor> RedisSession<R> {
     /// Set time to live in seconds for session value.
     pub fn ttl(mut self, ttl: i64) -> Self {
         Rc::get_mut(&mut self.0).unwrap().ttl = ttl;
@@ -483,7 +485,7 @@ mod test {
 
     #[actix_rt::test]
     async fn test_workflow() {
-        let srv = test::start(|| {
+        let srv = actix_test::start(|| {
             App::new()
                 .wrap(RedisSession::new("127.0.0.1:6379", &[0; 32]).cookie_name("test-session"))
                 .wrap(middleware::Logger::default())
@@ -497,7 +499,7 @@ mod test {
 
     #[actix_rt::test]
     async fn test_workflow_cluster() {
-        let srv_cluster = test::start(|| {
+        let srv_cluster = actix_test::start(|| {
             App::new()
                 .wrap(
                     RedisSession::new_cluster("127.0.0.1:7000", &[0; 32])
@@ -512,7 +514,7 @@ mod test {
         test_workflow_helper(srv_cluster).await;
     }
 
-    async fn test_workflow_helper(srv: test::TestServer) {
+    async fn test_workflow_helper(srv: actix_test::TestServer) {
         // Step 1:  GET index
         //   - set-cookie actix-session will be in response (session cookie #1)
         //   - response should be: {"counter": 0, "user_id": None}
@@ -544,15 +546,6 @@ mod test {
         //   - set-cookie actix-session will be in response (session cookie #3)
         //   - response should be: {"counter": 0, "user_id": None}
 
-        let srv = actix_test::start(|| {
-            App::new()
-                .wrap(RedisSession::new("127.0.0.1:6379", &[0; 32]).cookie_name("test-session"))
-                .wrap(middleware::Logger::default())
-                .service(resource("/").route(get().to(index)))
-                .service(resource("/do_something").route(post().to(do_something)))
-                .service(resource("/login").route(post().to(login)))
-                .service(resource("/logout").route(post().to(logout)))
-        });
         // Step 1:  GET index
         //   - set-cookie actix-session will be in response (session cookie #1)
         //   - response should be: {"counter": 0, "user_id": None}

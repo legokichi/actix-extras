@@ -1,9 +1,9 @@
 use actix_redis::{command::*, RedisClusterActor};
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::time::Duration;
-use tokio::time::delay_for;
+use tokio::time;
 
 fn success<T: Debug, E1: Debug, E2: Debug>(res: Result<Result<T, E1>, E2>) -> T {
     match res {
@@ -125,7 +125,7 @@ async fn test_cluster_redirect() {
     );
 
     // wait until migration completes
-    delay_for(Duration::from_secs(3)).await;
+    time::sleep(Duration::from_secs(3)).await;
 
     // test MOVED redirection
     assert_eq!(
