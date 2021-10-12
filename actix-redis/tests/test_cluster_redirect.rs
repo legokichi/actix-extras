@@ -96,13 +96,7 @@ async fn test_cluster_redirect() {
             .into_iter()
             .map(|key| {
                 addr.send(DirectedTo {
-                    command: migrate(
-                        destination_host.clone(),
-                        destination_port,
-                        key,
-                        0,
-                        100,
-                    ),
+                    command: migrate(destination_host.clone(), destination_port, key, 0, 100),
                     slot: source_slot,
                 })
             })

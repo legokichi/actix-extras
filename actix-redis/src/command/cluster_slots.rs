@@ -26,14 +26,9 @@ impl RedisCommand for ClusterSlots {
         fn parse_int(resp: RespValue) -> Result<u16, DeserializeError> {
             match resp {
                 Integer(i) => i.try_into().map_err(|_| {
-                    DeserializeError::new(
-                        "CLUSTER SLOTS: integer out of range",
-                        Integer(i),
-                    )
+                    DeserializeError::new("CLUSTER SLOTS: integer out of range", Integer(i))
                 }),
-                resp => {
-                    Err(DeserializeError::new("CLUSTER SLOTS: not an integer", resp))
-                }
+                resp => Err(DeserializeError::new("CLUSTER SLOTS: not an integer", resp)),
             }
         }
 
@@ -58,8 +53,7 @@ impl RedisCommand for ClusterSlots {
                                 let mut it = node.into_iter();
                                 let addr = parse_string(it.next().unwrap())?;
                                 let port = parse_int(it.next().unwrap())?;
-                                let id =
-                                    it.next().and_then(|resp| parse_string(resp).ok());
+                                let id = it.next().and_then(|resp| parse_string(resp).ok());
 
                                 Ok((addr, port, id))
                             }
