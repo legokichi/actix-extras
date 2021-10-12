@@ -1,15 +1,15 @@
-use std::collections::VecDeque;
-use std::io;
-
 use actix::prelude::*;
 use actix_rt::net::TcpStream;
 use actix_service::boxed::{service, BoxService};
 use actix_tls::connect::{default_connector, Connect, ConnectError, Connection};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
+use futures::FutureExt;
 use log::{error, info, warn};
 use redis_async::error::Error as RespError;
 use redis_async::resp::{RespCodec, RespValue};
+use std::collections::VecDeque;
+use std::io;
 use tokio::io::{split, WriteHalf};
 use tokio::sync::oneshot;
 use tokio_util::codec::FramedRead;

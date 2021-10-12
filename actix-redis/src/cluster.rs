@@ -1,8 +1,8 @@
 use actix::prelude::*;
-use actix_utils::oneshot;
-use futures_util::future::FutureExt;
+use futures::future::FutureExt;
 use log::{debug, info, warn};
 use redis_async::resp::RespValue;
+use tokio::sync::oneshot;
 
 use std::collections::HashMap;
 
@@ -251,7 +251,7 @@ where
         // refuse operations over multiple slots
         let slot = match msg.slot() {
             Ok(slot) => slot,
-            Err(e) => return Box::pin(futures_util::future::err(Error::DifferentSlots(e))),
+            Err(e) => return Box::pin(async { Err(Error::DifferentSlots(e)) }),
         };
         let req = msg.serialize();
 

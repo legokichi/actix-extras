@@ -12,7 +12,6 @@ use actix_web::{
 };
 use futures_core::future::LocalBoxFuture;
 use rand::{distributions::Alphanumeric, rngs::OsRng, Rng};
-use redis_async::{resp::RespValue, resp_array};
 use time::{self, Duration, OffsetDateTime};
 
 use crate::cluster::RedisClusterActor;
@@ -81,13 +80,13 @@ impl RedisSession<RedisClusterActor> {
             secure: false,
             max_age: Some(Duration::days(7)),
             same_site: None,
-            http_only: true,
+            http_only: Some(true),
         }))
     }
 
     /// Set time to live in seconds for session value.
-    pub fn ttl(mut self, ttl: u32) -> Self {
-        Rc::get_mut(&mut self.0).unwrap().ttl = format!("{}", ttl);
+    pub fn ttl(mut self, ttl: i64) -> Self {
+        Rc::get_mut(&mut self.0).unwrap().ttl = ttl;
         self
     }
 
@@ -140,7 +139,7 @@ impl RedisSession<RedisClusterActor> {
     ///
     /// Default is true.
     pub fn cookie_http_only(mut self, http_only: bool) -> Self {
-        Rc::get_mut(&mut self.0).unwrap().http_only = http_only;
+        Rc::get_mut(&mut self.0).unwrap().http_only = Some(http_only);
         self
     }
 
@@ -153,14 +152,14 @@ impl RedisSession<RedisClusterActor> {
 
 /// Cookie session middleware
 pub struct RedisSessionMiddleware<S: 'static, R: Actor> {
-    service: Rc<RefCell<S>>,
+    service: Rc<S>,
     inner: Rc<Inner<R>>,
 }
 
 struct Inner<R: Actor> {
     key: Key,
     cache_keygen: Box<dyn Fn(&str) -> String>,
-    ttl: String,
+    ttl: i64,
     addr: Addr<R>,
     name: String,
     path: String,
@@ -261,7 +260,7 @@ macro_rules! impl_methods {
             }
         }
 
-        impl Inner {
+        impl Inner<$R> {
             async fn load(
                 &self,
                 req: &ServiceRequest,
@@ -291,31 +290,18 @@ macro_rules! impl_methods {
                     }
                 };
 
-                let val = self
-                    .addr
-                    .send(Command(resp_array!["GET", cache_key]))
-                    .await
-                    .map_err(error::ErrorInternalServerError)?
-                    .map_err(error::ErrorInternalServerError)?;
-
-                match val {
-                    RespValue::Error(err) => {
-                        return Err(error::ErrorInternalServerError(err));
-                    }
-                    RespValue::SimpleString(s) => {
-                        if let Ok(val) = serde_json::from_str(&s) {
-                            return Ok(Some((val, value)));
+                match self.addr.send(get(cache_key)).await {
+                    Err(e) => Err(error::ErrorInternalServerError(e)),
+                    Ok(Err(err)) => Err(error::ErrorInternalServerError(err)),
+                    Ok(Ok(Some(val))) => {
+                        if let Ok(val) = serde_json::from_slice(&val) {
+                            Ok(Some((val, value)))
+                        } else {
+                            Ok(None)
                         }
                     }
-                    RespValue::BulkString(s) => {
-                        if let Ok(val) = serde_json::from_slice(&s) {
-                            return Ok(Some((val, value)));
-                        }
-                    }
-                    _ => {}
+                    Ok(Ok(None)) => Ok(None),
                 }
-
-                Ok(None)
             }
 
             async fn update<B>(
@@ -367,10 +353,8 @@ macro_rules! impl_methods {
                     Ok(body) => body,
                 };
 
-                let cmd = Command(resp_array!["SET", cache_key, body, "EX", &self.ttl]);
-
                 self.addr
-                    .send(cmd)
+                    .send(set(cache_key, body).ex(self.ttl))
                     .await
                     .map_err(error::ErrorInternalServerError)?
                     .map_err(error::ErrorInternalServerError)?;
@@ -391,13 +375,13 @@ macro_rules! impl_methods {
 
                 let res = self
                     .addr
-                    .send(Command(resp_array!["DEL", cache_key]))
+                    .send(del(cache_key))
                     .await
                     .map_err(error::ErrorInternalServerError)?;
 
                 match res {
                     // redis responds with number of deleted records
-                    Ok(RespValue::Integer(x)) if x > 0 => Ok(()),
+                    Ok(x) if x > 0 => Ok(()),
                     _ => Err(error::ErrorInternalServerError(
                         "failed to remove session from cache",
                     )),
