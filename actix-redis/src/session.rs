@@ -165,250 +165,250 @@ struct Inner<R: Actor> {
 
 macro_rules! impl_methods {
     ($R:ty) => {
-        impl<S, B> Transform<S> for RedisSession<$R>
-        where
-            S: Service<
-                    Request = ServiceRequest,
-                    Response = ServiceResponse<B>,
-                    Error = Error,
-                > + 'static,
-            S::Future: 'static,
-            B: 'static,
-        {
-            type Request = ServiceRequest;
-            type Response = ServiceResponse<B>;
-            type Error = S::Error;
-            type InitError = ();
-            type Transform = RedisSessionMiddleware<S, $R>;
-            type Future = Ready<Result<Self::Transform, Self::InitError>>;
+impl<S, B> Transform<S> for RedisSession<$R>
+where
+    S: Service<
+            Request = ServiceRequest,
+            Response = ServiceResponse<B>,
+            Error = Error,
+        > + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Request = ServiceRequest;
+    type Response = ServiceResponse<B>;
+    type Error = S::Error;
+    type InitError = ();
+    type Transform = RedisSessionMiddleware<S, $R>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
-            fn new_transform(&self, service: S) -> Self::Future {
-                ok(RedisSessionMiddleware {
-                    service: Rc::new(RefCell::new(service)),
-                    inner: self.0.clone(),
-                })
-            }
-        }
+    fn new_transform(&self, service: S) -> Self::Future {
+        ok(RedisSessionMiddleware {
+            service: Rc::new(RefCell::new(service)),
+            inner: self.0.clone(),
+        })
+    }
+}
 
-        impl<S, B> Service for RedisSessionMiddleware<S, $R>
-        where
-            S: Service<
-                    Request = ServiceRequest,
-                    Response = ServiceResponse<B>,
-                    Error = Error,
-                > + 'static,
-            S::Future: 'static,
-            B: 'static,
-        {
-            type Request = ServiceRequest;
-            type Response = ServiceResponse<B>;
-            type Error = Error;
-            #[allow(clippy::type_complexity)]
-            type Future =
-                Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+impl<S, B> Service for RedisSessionMiddleware<S, $R>
+where
+    S: Service<
+            Request = ServiceRequest,
+            Response = ServiceResponse<B>,
+            Error = Error,
+        > + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Request = ServiceRequest;
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    #[allow(clippy::type_complexity)]
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
-            fn poll_ready(
-                &mut self,
-                cx: &mut Context<'_>,
-            ) -> Poll<Result<(), Self::Error>> {
-                self.service.borrow_mut().poll_ready(cx)
-            }
+    fn poll_ready(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        self.service.borrow_mut().poll_ready(cx)
+    }
 
-            fn call(&mut self, mut req: ServiceRequest) -> Self::Future {
-                let mut srv = self.service.clone();
-                let inner = self.inner.clone();
+    fn call(&mut self, mut req: ServiceRequest) -> Self::Future {
+        let mut srv = self.service.clone();
+        let inner = self.inner.clone();
 
-                Box::pin(async move {
-                    let state = inner.load(&req).await?;
-                    let value = if let Some((state, value)) = state {
-                        Session::set_session(state.into_iter(), &mut req);
-                        Some(value)
+        Box::pin(async move {
+            let state = inner.load(&req).await?;
+            let value = if let Some((state, value)) = state {
+                Session::set_session(state.into_iter(), &mut req);
+                Some(value)
+            } else {
+                None
+            };
+
+            let mut res = srv.call(req).await?;
+
+            match Session::get_changes(&mut res) {
+                (SessionStatus::Unchanged, None) => Ok(res),
+                (SessionStatus::Unchanged, Some(state)) => {
+                    if value.is_none() {
+                        // implies the session is new
+                        inner.update(res, state, value).await
                     } else {
-                        None
-                    };
-
-                    let mut res = srv.call(req).await?;
-
-                    match Session::get_changes(&mut res) {
-                        (SessionStatus::Unchanged, None) => Ok(res),
-                        (SessionStatus::Unchanged, Some(state)) => {
-                            if value.is_none() {
-                                // implies the session is new
-                                inner.update(res, state, value).await
-                            } else {
-                                Ok(res)
-                            }
-                        }
-                        (SessionStatus::Changed, Some(state)) => {
-                            inner.update(res, state, value).await
-                        }
-                        (SessionStatus::Purged, Some(_)) => {
-                            if let Some(val) = value {
-                                inner.clear_cache(val).await?;
-                                match inner.remove_cookie(&mut res) {
-                                    Ok(_) => Ok(res),
-                                    Err(_err) => {
-                                        Err(error::ErrorInternalServerError(_err))
-                                    }
-                                }
-                            } else {
-                                Err(error::ErrorInternalServerError("unexpected"))
-                            }
-                        }
-                        (SessionStatus::Renewed, Some(state)) => {
-                            if let Some(val) = value {
-                                inner.clear_cache(val).await?;
-                                inner.update(res, state, None).await
-                            } else {
-                                inner.update(res, state, None).await
-                            }
-                        }
-                        (_, None) => unreachable!(),
+                        Ok(res)
                     }
-                })
+                }
+                (SessionStatus::Changed, Some(state)) => {
+                    inner.update(res, state, value).await
+                }
+                (SessionStatus::Purged, Some(_)) => {
+                    if let Some(val) = value {
+                        inner.clear_cache(val).await?;
+                        match inner.remove_cookie(&mut res) {
+                            Ok(_) => Ok(res),
+                            Err(_err) => {
+                                Err(error::ErrorInternalServerError(_err))
+                            }
+                        }
+                    } else {
+                        Err(error::ErrorInternalServerError("unexpected"))
+                    }
+                }
+                (SessionStatus::Renewed, Some(state)) => {
+                    if let Some(val) = value {
+                        inner.clear_cache(val).await?;
+                        inner.update(res, state, None).await
+                    } else {
+                        inner.update(res, state, None).await
+                    }
+                }
+                (_, None) => unreachable!(),
+            }
+        })
+    }
+}
+
+impl Inner<$R> {
+    async fn load(
+        &self,
+        req: &ServiceRequest,
+    ) -> Result<Option<(HashMap<String, String>, String)>, Error> {
+        if let Ok(cookies) = req.cookies() {
+            for cookie in cookies.iter() {
+                if cookie.name() == self.name {
+                    let mut jar = CookieJar::new();
+                    jar.add_original(cookie.clone());
+                    if let Some(cookie) = jar.signed(&self.key).get(&self.name) {
+                        let value = cookie.value().to_owned();
+                        let cachekey = (self.cache_keygen)(&cookie.value());
+                        return match self.addr.send(get(cachekey)).await {
+                            Err(e) => Err(Error::from(e)),
+                            Ok(res) => match res {
+                                Ok(val) => {
+                                    if let Some(val) = val {
+                                        if let Ok(val) =
+                                            serde_json::from_slice(&val)
+                                        {
+                                            return Ok(Some((val, value)));
+                                        }
+                                    }
+                                    Ok(None)
+                                }
+                                Err(err) => {
+                                    Err(error::ErrorInternalServerError(err))
+                                }
+                            },
+                        };
+                    } else {
+                        return Ok(None);
+                    }
+                }
             }
         }
+        Ok(None)
+    }
 
-        impl Inner<$R> {
-            async fn load(
-                &self,
-                req: &ServiceRequest,
-            ) -> Result<Option<(HashMap<String, String>, String)>, Error> {
-                if let Ok(cookies) = req.cookies() {
-                    for cookie in cookies.iter() {
-                        if cookie.name() == self.name {
-                            let mut jar = CookieJar::new();
-                            jar.add_original(cookie.clone());
-                            if let Some(cookie) = jar.signed(&self.key).get(&self.name) {
-                                let value = cookie.value().to_owned();
-                                let cachekey = (self.cache_keygen)(&cookie.value());
-                                return match self.addr.send(get(cachekey)).await {
-                                    Err(e) => Err(Error::from(e)),
-                                    Ok(res) => match res {
-                                        Ok(val) => {
-                                            if let Some(val) = val {
-                                                if let Ok(val) =
-                                                    serde_json::from_slice(&val)
-                                                {
-                                                    return Ok(Some((val, value)));
-                                                }
-                                            }
-                                            Ok(None)
-                                        }
-                                        Err(err) => {
-                                            Err(error::ErrorInternalServerError(err))
-                                        }
-                                    },
-                                };
-                            } else {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
-                Ok(None)
+    async fn update<B>(
+        &self,
+        mut res: ServiceResponse<B>,
+        state: impl Iterator<Item = (String, String)>,
+        value: Option<String>,
+    ) -> Result<ServiceResponse<B>, Error> {
+        let (value, jar) = if let Some(value) = value {
+            (value, None)
+        } else {
+            let value: String = iter::repeat(())
+                .map(|()| OsRng.sample(Alphanumeric))
+                .take(32)
+                .collect();
+
+            // prepare session id cookie
+            let mut cookie = Cookie::new(self.name.clone(), value.clone());
+            cookie.set_path(self.path.clone());
+            cookie.set_secure(self.secure);
+            cookie.set_http_only(self.http_only.unwrap_or(true));
+
+            if let Some(ref domain) = self.domain {
+                cookie.set_domain(domain.clone());
             }
 
-            async fn update<B>(
-                &self,
-                mut res: ServiceResponse<B>,
-                state: impl Iterator<Item = (String, String)>,
-                value: Option<String>,
-            ) -> Result<ServiceResponse<B>, Error> {
-                let (value, jar) = if let Some(value) = value {
-                    (value, None)
-                } else {
-                    let value: String = iter::repeat(())
-                        .map(|()| OsRng.sample(Alphanumeric))
-                        .take(32)
-                        .collect();
-
-                    // prepare session id cookie
-                    let mut cookie = Cookie::new(self.name.clone(), value.clone());
-                    cookie.set_path(self.path.clone());
-                    cookie.set_secure(self.secure);
-                    cookie.set_http_only(self.http_only.unwrap_or(true));
-
-                    if let Some(ref domain) = self.domain {
-                        cookie.set_domain(domain.clone());
-                    }
-
-                    if let Some(max_age) = self.max_age {
-                        cookie.set_max_age(max_age);
-                    }
-
-                    if let Some(same_site) = self.same_site {
-                        cookie.set_same_site(same_site);
-                    }
-
-                    // set cookie
-                    let mut jar = CookieJar::new();
-                    jar.signed(&self.key).add(cookie);
-
-                    (value, Some(jar))
-                };
-
-                let cachekey = (self.cache_keygen)(&value);
-
-                let state: HashMap<_, _> = state.collect();
-                match serde_json::to_string(&state) {
-                    Err(e) => Err(e.into()),
-                    Ok(body) => {
-                        match self.addr.send(set(cachekey, body).ex(self.ttl)).await {
-                            Err(e) => Err(Error::from(e)),
-                            Ok(redis_result) => match redis_result {
-                                Ok(_) => {
-                                    if let Some(jar) = jar {
-                                        for cookie in jar.delta() {
-                                            let val = HeaderValue::from_str(
-                                                &cookie.to_string(),
-                                            )?;
-                                            res.headers_mut()
-                                                .append(header::SET_COOKIE, val);
-                                        }
-                                    }
-                                    Ok(res)
-                                }
-                                Err(err) => Err(error::ErrorInternalServerError(err)),
-                            },
-                        }
-                    }
-                }
+            if let Some(max_age) = self.max_age {
+                cookie.set_max_age(max_age);
             }
 
-            /// removes cache entry
-            async fn clear_cache(&self, key: String) -> Result<(), Error> {
-                let cachekey = (self.cache_keygen)(&key);
+            if let Some(same_site) = self.same_site {
+                cookie.set_same_site(same_site);
+            }
 
-                match self.addr.send(del(cachekey)).await {
+            // set cookie
+            let mut jar = CookieJar::new();
+            jar.signed(&self.key).add(cookie);
+
+            (value, Some(jar))
+        };
+
+        let cachekey = (self.cache_keygen)(&value);
+
+        let state: HashMap<_, _> = state.collect();
+        match serde_json::to_string(&state) {
+            Err(e) => Err(e.into()),
+            Ok(body) => {
+                match self.addr.send(set(cachekey, body).ex(self.ttl)).await {
                     Err(e) => Err(Error::from(e)),
-                    Ok(res) => match res {
-                        Ok(x) if x > 0 => Ok(()),
-                        _ => Err(error::ErrorInternalServerError(
-                            "failed to remove session from cache",
-                        )),
+                    Ok(redis_result) => match redis_result {
+                        Ok(_) => {
+                            if let Some(jar) = jar {
+                                for cookie in jar.delta() {
+                                    let val = HeaderValue::from_str(
+                                        &cookie.to_string(),
+                                    )?;
+                                    res.headers_mut()
+                                        .append(header::SET_COOKIE, val);
+                                }
+                            }
+                            Ok(res)
+                        }
+                        Err(err) => Err(error::ErrorInternalServerError(err)),
                     },
                 }
             }
-
-            /// invalidates session cookie
-            fn remove_cookie<B>(
-                &self,
-                res: &mut ServiceResponse<B>,
-            ) -> Result<(), Error> {
-                let mut cookie = Cookie::named(self.name.clone());
-                cookie.set_value("");
-                cookie.set_max_age(Duration::zero());
-                cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
-
-                let val = HeaderValue::from_str(&cookie.to_string())
-                    .map_err(error::ErrorInternalServerError)?;
-                res.headers_mut().append(header::SET_COOKIE, val);
-
-                Ok(())
-            }
         }
-    };
+    }
+
+    /// removes cache entry
+    async fn clear_cache(&self, key: String) -> Result<(), Error> {
+        let cachekey = (self.cache_keygen)(&key);
+
+        match self.addr.send(del(cachekey)).await {
+            Err(e) => Err(Error::from(e)),
+            Ok(res) => match res {
+                Ok(x) if x > 0 => Ok(()),
+                _ => Err(error::ErrorInternalServerError(
+                    "failed to remove session from cache",
+                )),
+            },
+        }
+    }
+
+    /// invalidates session cookie
+    fn remove_cookie<B>(
+        &self,
+        res: &mut ServiceResponse<B>,
+    ) -> Result<(), Error> {
+        let mut cookie = Cookie::named(self.name.clone());
+        cookie.set_value("");
+        cookie.set_max_age(Duration::zero());
+        cookie.set_expires(OffsetDateTime::now_utc() - Duration::days(365));
+
+        let val = HeaderValue::from_str(&cookie.to_string())
+            .map_err(error::ErrorInternalServerError)?;
+        res.headers_mut().append(header::SET_COOKIE, val);
+
+        Ok(())
+    }
+}
+};
 }
 
 impl_methods!(RedisActor);
