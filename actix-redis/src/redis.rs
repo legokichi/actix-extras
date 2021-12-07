@@ -1,7 +1,8 @@
 use actix::prelude::*;
 use actix_rt::net::TcpStream;
 use actix_service::boxed::{service, BoxService};
-use actix_tls::connect::{default_connector, Connect, ConnectError, Connection};
+use actix_tls::connect::tcp::TcpConnectorService;
+use actix_tls::connect::{ConnectError, ConnectInfo, Connection};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use futures::FutureExt;
@@ -28,7 +29,7 @@ impl Message for Command {
 /// Redis communication actor
 pub struct RedisActor {
     addr: String,
-    connector: BoxService<Connect<String>, Connection<String, TcpStream>, ConnectError>,
+    connector: BoxService<ConnectInfo<String>, Connection<String, TcpStream>, ConnectError>,
     backoff: ExponentialBackoff,
     cell: Option<actix::io::FramedWrite<RespValue, WriteHalf<TcpStream>, RespCodec>>,
     queue: VecDeque<oneshot::Sender<Result<RespValue, Error>>>,
@@ -46,7 +47,7 @@ impl RedisActor {
 
         Supervisor::start(|_| RedisActor {
             addr,
-            connector: service(default_connector()),
+            connector: service(TcpConnectorService::default()),
             cell: None,
             backoff,
             queue: VecDeque::new(),
@@ -58,7 +59,7 @@ impl Actor for RedisActor {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Context<Self>) {
-        let req = Connect::new(self.addr.to_owned());
+        let req = ConnectInfo::new(self.addr.to_owned());
         self.connector
             .call(req)
             .into_actor(self)
