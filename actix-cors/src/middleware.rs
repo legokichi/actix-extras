@@ -1,19 +1,23 @@
-use std::{convert::TryInto, error::Error as StdError, rc::Rc};
+use std::{collections::HashSet, rc::Rc};
 
+use actix_utils::future::ok;
 use actix_web::{
-    body::{AnyBody, MessageBody},
-    dev::{Service, ServiceRequest, ServiceResponse},
-    error::{Error, Result},
+    body::{EitherBody, MessageBody},
+    dev::{forward_ready, Service, ServiceRequest, ServiceResponse},
     http::{
         header::{self, HeaderValue},
         Method,
     },
-    HttpResponse,
+    Error, HttpResponse, Result,
 };
-use futures_util::future::{ok, Either, FutureExt as _, LocalBoxFuture, Ready, TryFutureExt as _};
+use futures_util::future::{FutureExt as _, LocalBoxFuture};
 use log::debug;
 
-use crate::Inner;
+use crate::{
+    builder::intersperse_header_values,
+    inner::{add_vary_header, header_value_try_into_method},
+    AllOrSome, Inner,
+};
 
 /// Service wrapper for Cross-Origin Resource Sharing support.
 ///
@@ -27,7 +31,35 @@ pub struct CorsMiddleware<S> {
 }
 
 impl<S> CorsMiddleware<S> {
-    fn handle_preflight(inner: &Inner, req: ServiceRequest) -> ServiceResponse {
+    /// Returns true if request is `OPTIONS` and contains an `Access-Control-Request-Method` header.
+    fn is_request_preflight(req: &ServiceRequest) -> bool {
+        // check request method is OPTIONS
+        if req.method() != Method::OPTIONS {
+            return false;
+        }
+
+        // check follow-up request method is present and valid
+        if req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+            .and_then(header_value_try_into_method)
+            .is_none()
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Validates preflight request headers against configuration and constructs preflight response.
+    ///
+    /// Checks:
+    /// - `Origin` header is acceptable;
+    /// - `Access-Control-Request-Method` header is acceptable;
+    /// - `Access-Control-Request-Headers` header is acceptable.
+    fn handle_preflight(&self, req: ServiceRequest) -> ServiceResponse {
+        let inner = Rc::clone(&self.inner);
+
         if let Err(err) = inner
             .validate_origin(req.head())
             .and_then(|_| inner.validate_allowed_method(req.head()))
@@ -67,7 +99,12 @@ impl<S> CorsMiddleware<S> {
             res.insert_header((header::ACCESS_CONTROL_MAX_AGE, max_age.to_string()));
         }
 
-        let res = res.finish();
+        let mut res = res.finish();
+
+        if inner.vary_header {
+            add_vary_header(res.headers_mut());
+        }
+
         req.into_response(res)
     }
 
@@ -78,8 +115,34 @@ impl<S> CorsMiddleware<S> {
         };
 
         if let Some(ref expose) = inner.expose_headers_baked {
+            log::trace!("exposing selected headers: {:?}", expose);
+
             res.headers_mut()
                 .insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose.clone());
+        } else if matches!(inner.expose_headers, AllOrSome::All) {
+            // intersperse_header_values requires that argument is non-empty
+            if !res.request().headers().is_empty() {
+                // extract header names from request
+                let expose_all_request_headers = res
+                    .request()
+                    .headers()
+                    .keys()
+                    .into_iter()
+                    .map(|name| name.as_str())
+                    .collect::<HashSet<_>>();
+
+                // create comma separated string of header names
+                let expose_headers_value = intersperse_header_values(&expose_all_request_headers);
+
+                log::trace!(
+                    "exposing all headers from request: {:?}",
+                    expose_headers_value
+                );
+
+                // add header names to expose response header
+                res.headers_mut()
+                    .insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose_headers_value);
+            }
         }
 
         if inner.supports_credentials {
@@ -90,75 +153,56 @@ impl<S> CorsMiddleware<S> {
         }
 
         if inner.vary_header {
-            let value = match res.headers_mut().get(header::VARY) {
-                Some(hdr) => {
-                    let mut val: Vec<u8> = Vec::with_capacity(hdr.len() + 8);
-                    val.extend(hdr.as_bytes());
-                    val.extend(b", Origin");
-                    val.try_into().unwrap()
-                }
-                None => HeaderValue::from_static("Origin"),
-            };
-
-            res.headers_mut().insert(header::VARY, value);
+            add_vary_header(res.headers_mut());
         }
 
         res
     }
 }
 
-type CorsMiddlewareServiceFuture = Either<
-    Ready<Result<ServiceResponse, Error>>,
-    LocalBoxFuture<'static, Result<ServiceResponse, Error>>,
->;
-
 impl<S, B> Service<ServiceRequest> for CorsMiddleware<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
     S::Future: 'static,
-    B: MessageBody + 'static,
-    B::Error: StdError,
-{
-    type Response = ServiceResponse;
-    type Error = Error;
-    type Future = CorsMiddlewareServiceFuture;
 
-    actix_service::forward_ready!(service);
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type Future = LocalBoxFuture<'static, Result<ServiceResponse<EitherBody<B>>, Error>>;
+
+    forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        if self.inner.preflight && req.method() == Method::OPTIONS {
-            let inner = Rc::clone(&self.inner);
-            let res = Self::handle_preflight(&inner, req);
-            Either::Left(ok(res))
-        } else {
-            let origin = req.headers().get(header::ORIGIN).cloned();
+        let origin = req.headers().get(header::ORIGIN);
 
-            if origin.is_some() {
-                // Only check requests with a origin header.
-                if let Err(err) = self.inner.validate_origin(req.head()) {
-                    debug!("origin validation failed; inner service is not called");
-                    return Either::Left(ok(req.error_response(err)));
-                }
-            }
-
-            let inner = Rc::clone(&self.inner);
-            let fut = self.service.call(req);
-
-            let res = async move {
-                let res = fut.await;
-
-                if origin.is_some() {
-                    let res = res?;
-                    Ok(Self::augment_response(&inner, res))
-                } else {
-                    res
-                }
-            }
-            .map_ok(|res| res.map_body(|_, body| AnyBody::from_message(body)))
-            .boxed_local();
-
-            Either::Right(res)
+        // handle preflight requests
+        if self.inner.preflight && Self::is_request_preflight(&req) {
+            let res = self.handle_preflight(req);
+            return ok(res.map_into_right_body()).boxed_local();
         }
+
+        // only check actual requests with a origin header
+        if origin.is_some() {
+            if let Err(err) = self.inner.validate_origin(req.head()) {
+                debug!("origin validation failed; inner service is not called");
+                let mut res = req.error_response(err);
+
+                if self.inner.vary_header {
+                    add_vary_header(res.headers_mut());
+                }
+
+                return ok(res.map_into_right_body()).boxed_local();
+            }
+        }
+
+        let inner = Rc::clone(&self.inner);
+        let fut = self.service.call(req);
+
+        Box::pin(async move {
+            let res = fut.await;
+            Ok(Self::augment_response(&inner, res?).map_into_left_body())
+        })
     }
 }
 
@@ -166,13 +210,20 @@ where
 mod tests {
     use actix_web::{
         dev::Transform,
+        middleware::Compat,
         test::{self, TestRequest},
+        App,
     };
 
     use super::*;
     use crate::Cors;
 
-    #[actix_rt::test]
+    #[test]
+    fn compat_compat() {
+        let _ = App::new().wrap(Compat::new(Cors::default()));
+    }
+
+    #[actix_web::test]
     async fn test_options_no_origin() {
         // Tests case where allowed_origins is All but there are validate functions to run incase.
         // In this case, origins are only allowed when the DNT header is sent.
@@ -181,7 +232,6 @@ mod tests {
             .allow_any_origin()
             .allowed_origin_fn(|origin, req_head| {
                 assert_eq!(&origin, req_head.headers.get(header::ORIGIN).unwrap());
-
                 req_head.headers().contains_key(header::DNT)
             })
             .new_transform(test::ok_service())
