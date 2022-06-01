@@ -7,7 +7,7 @@ members = [
     # TODO: move this example to examples repo
     # "actix-protobuf/examples/prost-example",
     "actix-redis",
-    #"actix-session",
+    "actix-session",
     #"actix-web-httpauth",
 ]
 
@@ -16,7 +16,7 @@ members = [
 #actix-identity = { path = "./actix-identity" }
 #actix-protobuf = { path = "./actix-protobuf" }
 actix-redis = { path = "./actix-redis" }
-#actix-session = { path = "./actix-session" }
+actix-session = { path = "./actix-session" }
 #actix-web-httpauth = { path = "./actix-web-httpauth" }
 
 # uncomment to quickly test against local actix-web repo

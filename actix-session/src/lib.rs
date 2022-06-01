@@ -553,6 +553,7 @@ pub mod test_helpers {
         struct Identity {
             user_id: String,
         }
+
         async fn login(user_id: web::Json<Identity>, session: Session) -> Result<HttpResponse> {
             let id = user_id.into_inner().user_id;
             session.insert("user_id", &id)?;
@@ -583,34 +584,3 @@ pub mod test_helpers {
         }
     }
 }
-
-/// Extractor implementation for Session type.
-///
-/// # Examples
-/// ```
-/// # use actix_web::*;
-/// use actix_session::Session;
-///
-/// #[get("/")]
-/// async fn index(session: Session) -> Result<impl Responder> {
-///     // access session data
-///     if let Some(count) = session.get::<i32>("counter")? {
-///         session.insert("counter", count + 1)?;
-///     } else {
-///         session.insert("counter", 1)?;
-///     }
-///
-///     let count = session.get::<i32>("counter")?.unwrap();
-///     Ok(format!("Counter: {}", count))
-/// }
-/// ```
-impl FromRequest for Session {
-    type Error = Error;
-    type Future = Ready<Result<Session, Error>>;
-
-    #[inline]
-    fn from_request(req: &HttpRequest, _: &mut Payload) -> Self::Future {
-        ok(Session::get_session(&mut *req.extensions_mut()))
-    }
-}
-
