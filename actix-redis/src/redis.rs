@@ -162,7 +162,7 @@ where
         Box::pin(rx.map(|res| match res {
             Ok(Ok(resp)) => match T::deserialize(resp) {
                 Ok(output) => Ok(output),
-                Err(e) => Err(Error::Redis(RespError::RESP(e.message, e.resp))),
+                Err(e) => Err(Error::Redis(RespError::Resp(e.message, e.resp))),
             },
             Ok(Err(e)) => Err(e),
             Err(_) => Err(Error::Disconnected),

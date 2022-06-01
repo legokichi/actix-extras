@@ -259,7 +259,7 @@ where
         ctx.spawn(self.dispatch(slot, None, req, 0, sender));
         Box::pin(receiver.map(|res| match res {
             Ok(Ok(res)) => {
-                T::deserialize(res).map_err(|e| Error::Redis(RespError::RESP(e.message, e.resp)))
+                T::deserialize(res).map_err(|e| Error::Redis(RespError::Resp(e.message, e.resp)))
             }
             Ok(Err(e)) => Err(e),
             Err(_canceled) => Err(Error::Disconnected),
