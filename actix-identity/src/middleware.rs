@@ -1,11 +1,12 @@
-use std::{error::Error as StdError, rc::Rc};
+use std::rc::Rc;
 
+use actix_utils::future::{ready, Ready};
 use actix_web::{
-    body::{AnyBody, MessageBody},
+    body::{EitherBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage, Result,
 };
-use futures_util::future::{ready, FutureExt as _, LocalBoxFuture, Ready, TryFutureExt as _};
+use futures_util::future::{FutureExt as _, LocalBoxFuture};
 
 use crate::{identity::IdentityItem, IdentityPolicy};
 
@@ -43,9 +44,8 @@ where
     S::Future: 'static,
     T: IdentityPolicy,
     B: MessageBody + 'static,
-    B::Error: StdError,
 {
-    type Response = ServiceResponse;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
     type InitError = ();
     type Transform = IdentityServiceMiddleware<S, T>;
@@ -79,9 +79,8 @@ where
     S::Future: 'static,
     T: IdentityPolicy,
     B: MessageBody + 'static,
-    B::Error: StdError,
 {
-    type Response = ServiceResponse;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
     type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -103,17 +102,16 @@ where
 
                     if let Some(id) = id {
                         match backend.to_response(id.id, id.changed, &mut res).await {
-                            Ok(_) => Ok(res.map_body(|_, body| AnyBody::from_message(body))),
-                            Err(e) => Ok(res.error_response(e)),
+                            Ok(_) => Ok(res.map_into_left_body()),
+                            Err(err) => Ok(res.error_response(err).map_into_right_body()),
                         }
                     } else {
-                        Ok(res.map_body(|_, body| AnyBody::from_message(body)))
+                        Ok(res.map_into_left_body())
                     }
                 }
-                Err(err) => Ok(req.error_response(err)),
+                Err(err) => Ok(req.error_response(err).map_into_right_body()),
             }
         }
-        .map_ok(|res| res.map_body(|_, body| AnyBody::from_message(body)))
         .boxed_local()
     }
 }
@@ -127,9 +125,10 @@ mod tests {
 
     use super::*;
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_borrowed_mut_error() {
-        use futures_util::future::{lazy, ok, Ready};
+        use actix_utils::future::{ok, Ready};
+        use futures_util::future::lazy;
 
         struct Ident;
         impl IdentityPolicy for Ident {
@@ -153,7 +152,7 @@ mod tests {
         let srv = crate::middleware::IdentityServiceMiddleware {
             backend: Rc::new(Ident),
             service: Rc::new(into_service(|_: dev::ServiceRequest| async move {
-                actix_rt::time::sleep(Duration::from_secs(100)).await;
+                actix_web::rt::time::sleep(Duration::from_secs(100)).await;
                 Err::<dev::ServiceResponse, _>(error::ErrorBadRequest("error"))
             })),
         };
@@ -161,11 +160,11 @@ mod tests {
         let srv2 = srv.clone();
         let req = test::TestRequest::default().to_srv_request();
 
-        actix_rt::spawn(async move {
+        actix_web::rt::spawn(async move {
             let _ = srv2.call(req).await;
         });
 
-        actix_rt::time::sleep(Duration::from_millis(50)).await;
+        actix_web::rt::time::sleep(Duration::from_millis(50)).await;
 
         let _ = lazy(|cx| srv.poll_ready(cx)).await;
     }

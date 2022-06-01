@@ -23,28 +23,34 @@
 //!
 //! #[post("/login")]
 //! async fn login(id: Identity) -> HttpResponse {
-//!     id.remember("User1".to_owned()); // <- remember identity
+//!     // remember identity
+//!     id.remember("User1".to_owned());
 //!     HttpResponse::Ok().finish()
 //! }
 //!
 //! #[post("/logout")]
 //! async fn logout(id: Identity) -> HttpResponse {
-//!     id.forget();                      // <- remove identity
+//!     // remove identity
+//!     id.forget();
 //!     HttpResponse::Ok().finish()
 //! }
 //!
-//! // create cookie identity backend
-//! let policy = CookieIdentityPolicy::new(&[0; 32])
-//!     .name("auth-cookie")
-//!     .secure(false);
+//! HttpServer::new(move || {
+//!     // create cookie identity backend (inside closure, since policy is not Clone)
+//!     let policy = CookieIdentityPolicy::new(&[0; 32])
+//!         .name("auth-cookie")
+//!         .secure(false);
 //!
-//! let app = App::new()
-//!     // wrap policy into middleware identity middleware
-//!     .wrap(IdentityService::new(policy))
-//!     .service(services![index, login, logout]);
+//!     App::new()
+//!         // wrap policy into middleware identity middleware
+//!         .wrap(IdentityService::new(policy))
+//!         .service(services![index, login, logout])
+//! })
+//! # ;
 //! ```
 
 #![deny(rust_2018_idioms, nonstandard_style)]
+#![warn(future_incompatible)]
 
 use std::future::Future;
 
@@ -102,7 +108,11 @@ where
 mod tests {
     use std::time::SystemTime;
 
-    use actix_web::{dev::ServiceResponse, test, web, App, Error};
+    use actix_web::{
+        body::{BoxBody, EitherBody},
+        dev::ServiceResponse,
+        test, web, App, Error,
+    };
 
     use super::*;
 
@@ -129,7 +139,7 @@ mod tests {
         f: F,
     ) -> impl actix_service::Service<
         actix_http::Request,
-        Response = ServiceResponse<actix_web::body::Body>,
+        Response = ServiceResponse<EitherBody<BoxBody>>,
         Error = Error,
     > {
         test::init_service(

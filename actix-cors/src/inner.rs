@@ -4,7 +4,7 @@ use actix_web::{
     dev::RequestHead,
     error::Result,
     http::{
-        header::{self, HeaderName, HeaderValue},
+        header::{self, HeaderMap, HeaderName, HeaderValue},
         Method,
     },
 };
@@ -33,7 +33,7 @@ impl fmt::Debug for OriginFn {
 }
 
 /// Try to parse header value as HTTP method.
-fn header_value_try_into_method(hdr: &HeaderValue) -> Option<Method> {
+pub(crate) fn header_value_try_into_method(hdr: &HeaderValue) -> Option<Method> {
     hdr.to_str()
         .ok()
         .and_then(|meth| Method::try_from(meth).ok())
@@ -141,7 +141,7 @@ impl Inner {
             // method invalid
             Some(_) => Err(CorsError::BadRequestMethod),
 
-            // method missing
+            // method missing so this is not a preflight request
             None => Err(CorsError::MissingRequestMethod),
         }
     }
@@ -199,13 +199,35 @@ impl Inner {
     }
 }
 
+/// Add CORS related request headers to response's Vary header.
+///
+/// See <https://fetch.spec.whatwg.org/#cors-protocol-and-http-caches>.
+pub(crate) fn add_vary_header(headers: &mut HeaderMap) {
+    let value = match headers.get(header::VARY) {
+        Some(hdr) => {
+            let mut val: Vec<u8> = Vec::with_capacity(hdr.len() + 71);
+            val.extend(hdr.as_bytes());
+            val.extend(b", Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+            val.try_into().unwrap()
+        }
+        None => HeaderValue::from_static(
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+        ),
+    };
+
+    headers.insert(header::VARY, value);
+}
+
 #[cfg(test)]
 mod test {
     use std::rc::Rc;
 
     use actix_web::{
         dev::Transform,
-        http::{header, HeaderValue, Method, StatusCode},
+        http::{
+            header::{self, HeaderValue},
+            Method, StatusCode,
+        },
         test::{self, TestRequest},
     };
 
@@ -215,7 +237,7 @@ mod test {
         val.to_str().unwrap()
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_validate_not_allowed_origin() {
         let cors = Cors::default()
             .allowed_origin("https://www.example.com")
@@ -233,7 +255,7 @@ mod test {
         assert!(cors.inner.validate_allowed_headers(req.head()).is_err());
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_preflight() {
         let mut cors = Cors::default()
             .allow_any_origin()
@@ -255,7 +277,7 @@ mod test {
         assert!(cors.inner.validate_allowed_method(req.head()).is_err());
         assert!(cors.inner.validate_allowed_headers(req.head()).is_err());
         let resp = test::call_service(&cors, req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
 
         let req = TestRequest::default()
             .method(Method::OPTIONS)
@@ -323,5 +345,38 @@ mod test {
 
         let resp = test::call_service(&cors, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn allow_fn_origin_equals_head_origin() {
+        let cors = Cors::default()
+            .allowed_origin_fn(|origin, head| {
+                let head_origin = head
+                    .headers()
+                    .get(header::ORIGIN)
+                    .expect("unwrapping origin header should never fail in allowed_origin_fn");
+                assert!(origin == head_origin);
+                true
+            })
+            .allow_any_method()
+            .allow_any_header()
+            .new_transform(test::status_service(StatusCode::NO_CONTENT))
+            .await
+            .unwrap();
+
+        let req = TestRequest::default()
+            .method(Method::OPTIONS)
+            .insert_header(("Origin", "https://www.example.com"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "POST"))
+            .to_srv_request();
+        let resp = test::call_service(&cors, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = TestRequest::default()
+            .method(Method::GET)
+            .insert_header(("Origin", "https://www.example.com"))
+            .to_srv_request();
+        let resp = test::call_service(&cors, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 }

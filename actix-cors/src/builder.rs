@@ -1,15 +1,16 @@
-use std::{
-    collections::HashSet, convert::TryInto, error::Error as StdError, iter::FromIterator, rc::Rc,
-};
+use std::{collections::HashSet, convert::TryInto, iter::FromIterator, rc::Rc};
 
+use actix_utils::future::{self, Ready};
 use actix_web::{
-    body::MessageBody,
+    body::{EitherBody, MessageBody},
     dev::{RequestHead, Service, ServiceRequest, ServiceResponse, Transform},
-    error::{Error, Result},
-    http::{self, header::HeaderName, Error as HttpError, HeaderValue, Method, Uri},
-    Either,
+    error::HttpError,
+    http::{
+        header::{HeaderName, HeaderValue},
+        Method, Uri,
+    },
+    Either, Error, Result,
 };
-use futures_util::future::{self, Ready};
 use log::error;
 use once_cell::sync::Lazy;
 use smallvec::smallvec;
@@ -20,7 +21,7 @@ use crate::{AllOrSome, CorsError, CorsMiddleware, Inner, OriginFn};
 /// Additionally, always causes first error (if any) to be reported during initialization.
 fn cors<'a>(
     inner: &'a mut Rc<Inner>,
-    err: &Option<Either<http::Error, CorsError>>,
+    err: &Option<Either<HttpError, CorsError>>,
 ) -> Option<&'a mut Inner> {
     if err.is_some() {
         return None;
@@ -58,7 +59,7 @@ static ALL_METHODS_SET: Lazy<HashSet<Method>> = Lazy::new(|| {
 /// server will fail to start up or serve requests.
 ///
 /// # Example
-/// ```rust
+/// ```
 /// use actix_cors::Cors;
 /// use actix_web::http::header;
 ///
@@ -74,7 +75,7 @@ static ALL_METHODS_SET: Lazy<HashSet<Method>> = Lazy::new(|| {
 #[derive(Debug)]
 pub struct Cors {
     inner: Rc<Inner>,
-    error: Option<Either<http::Error, CorsError>>,
+    error: Option<Either<HttpError, CorsError>>,
 }
 
 impl Cors {
@@ -95,6 +96,7 @@ impl Cors {
 
             expose_headers: AllOrSome::All,
             expose_headers_baked: None,
+
             max_age: Some(3600),
             preflight: true,
             send_wildcard: false,
@@ -359,9 +361,8 @@ impl Cors {
         self
     }
 
-    /// Set a maximum time (in seconds) for which this CORS request maybe cached.
-    /// This value is set as the `Access-Control-Max-Age` header as specified in
-    /// the [Fetch Standard CORS protocol].
+    /// Set a maximum time (in seconds) for which this CORS request may be cached. This value is set
+    /// as the `Access-Control-Max-Age` header as specified in the [Fetch Standard CORS protocol].
     ///
     /// Pass a number (of seconds) or use None to disable sending max age header.
     ///
@@ -486,10 +487,10 @@ impl<S, B> Transform<S, ServiceRequest> for Cors
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
     S::Future: 'static,
+
     B: MessageBody + 'static,
-    B::Error: StdError,
 {
-    type Response = ServiceResponse;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
     type InitError = ();
     type Transform = CorsMiddleware<S>;
@@ -544,13 +545,18 @@ where
 }
 
 /// Only call when values are guaranteed to be valid header values and set is not empty.
-fn intersperse_header_values<T>(val_set: &HashSet<T>) -> HeaderValue
+pub(crate) fn intersperse_header_values<T>(val_set: &HashSet<T>) -> HeaderValue
 where
     T: AsRef<str>,
 {
+    debug_assert!(
+        !val_set.is_empty(),
+        "only call `intersperse_header_values` when set is not empty"
+    );
+
     val_set
         .iter()
-        .fold(String::with_capacity(32), |mut acc, val| {
+        .fold(String::with_capacity(64), |mut acc, val| {
             acc.push_str(", ");
             acc.push_str(val.as_ref());
             acc
@@ -565,15 +571,13 @@ where
 #[cfg(test)]
 mod test {
     use std::convert::{Infallible, TryInto};
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
 
     use actix_web::{
-        body::{BodySize, MessageBody},
+        body,
         dev::{fn_service, Transform},
-        http::{HeaderName, StatusCode},
+        http::{header::HeaderName, StatusCode},
         test::{self, TestRequest},
-        web::{Bytes, HttpResponse},
+        HttpResponse,
     };
 
     use super::*;
@@ -591,7 +595,7 @@ mod test {
             .is_err());
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn restrictive_defaults() {
         let cors = Cors::default()
             .new_transform(test::ok_service())
@@ -606,12 +610,12 @@ mod test {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn allowed_header_try_from() {
         let _cors = Cors::default().allowed_header("Content-Type");
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn allowed_header_try_into() {
         struct ContentType;
 
@@ -626,25 +630,10 @@ mod test {
         let _cors = Cors::default().allowed_header(ContentType);
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn middleware_generic_over_body_type() {
-        struct Foo;
-
-        impl MessageBody for Foo {
-            type Error = std::io::Error;
-            fn size(&self) -> BodySize {
-                BodySize::None
-            }
-            fn poll_next(
-                self: Pin<&mut Self>,
-                _: &mut Context<'_>,
-            ) -> Poll<Option<Result<Bytes, Self::Error>>> {
-                Poll::Ready(None)
-            }
-        }
-
         let srv = fn_service(|req: ServiceRequest| async move {
-            Ok(req.into_response(HttpResponse::Ok().message_body(Foo)?))
+            Ok(req.into_response(HttpResponse::with_body(StatusCode::OK, body::None::new())))
         });
 
         Cors::default().new_transform(srv).await.unwrap();
