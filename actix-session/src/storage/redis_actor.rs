@@ -1,5 +1,9 @@
 use actix::Addr;
-use actix_redis::{resp_array, Command, RedisActor, RespValue};
+#[cfg(not(feature = "redis-cluster"))]
+use actix_redis::RedisActor;
+#[cfg(feature = "redis-cluster")]
+use actix_redis::RedisClusterActor as RedisActor;
+use actix_redis::{command, RespValue};
 use time::{self, Duration};
 
 use super::SessionKey;
@@ -76,6 +80,15 @@ impl RedisActorSessionStore {
     pub fn new<S: Into<String>>(connection_string: S) -> RedisActorSessionStore {
         Self::builder(connection_string).build()
     }
+
+    /// Create a new instance of [`RedisActorSessionStore`] using the default configuration with
+    /// RedisActor. Add the `redis-cluster` feature flag to switch RedisClusterActor.
+    pub fn from_addr(addr: Addr<RedisActor>) -> RedisActorSessionStore {
+        RedisActorSessionStore {
+            configuration: CacheConfiguration::default(),
+            addr,
+        }
+    }
 }
 
 struct CacheConfiguration {
@@ -125,13 +138,13 @@ impl SessionStore for RedisActorSessionStore {
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
         let val = self
             .addr
-            .send(Command(resp_array!["GET", cache_key]))
+            .send(command::get(cache_key))
             .await
             .map_err(Into::into)
             .map_err(LoadError::Other)?
             .map_err(Into::into)
             .map_err(LoadError::Other)?;
-
+        let val = val.map(RespValue::from).unwrap_or(RespValue::Nil);
         match val {
             RespValue::Error(err) => Err(LoadError::Other(anyhow::anyhow!(err))),
 
@@ -158,14 +171,9 @@ impl SessionStore for RedisActorSessionStore {
         let session_key = generate_session_key();
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
-        let cmd = Command(resp_array![
-            "SET",
-            cache_key,
-            body,
-            "NX", // NX: only set the key if it does not already exist
-            "EX", // EX: set expiry
-            format!("{}", ttl.whole_seconds())
-        ]);
+        let cmd = command::set(cache_key, body)
+            .nx() // NX: only set the key if it does not already exist
+            .ex(ttl.whole_seconds()); // EX: set expiry
 
         let result = self
             .addr
@@ -177,14 +185,10 @@ impl SessionStore for RedisActorSessionStore {
             .map_err(SaveError::Other)?;
 
         match result {
-            RespValue::SimpleString(_) => Ok(session_key),
-            RespValue::Nil => Err(SaveError::Other(anyhow::anyhow!(
-                "Failed to save session state. A record with the same key already existed in Redis"
+            false => Err(SaveError::Other(anyhow::anyhow!(
+                "Failed to save session state. A record with the same key already existed in Redis",
             ))),
-            err => Err(SaveError::Other(anyhow::anyhow!(
-                "Failed to save session state. {:?}",
-                err
-            ))),
+            true => Ok(session_key),
         }
     }
 
@@ -199,14 +203,9 @@ impl SessionStore for RedisActorSessionStore {
             .map_err(UpdateError::Serialization)?;
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
-        let cmd = Command(resp_array![
-            "SET",
-            cache_key,
-            body,
-            "XX", // XX: Only set the key if it already exist.
-            "EX", // EX: set expiry
-            format!("{}", ttl.whole_seconds())
-        ]);
+        let cmd = command::set(cache_key, body)
+            .xx() // XX: Only set the key if it already exist.
+            .ex(ttl.whole_seconds()); // EX: set expiry
 
         let result = self
             .addr
@@ -218,7 +217,7 @@ impl SessionStore for RedisActorSessionStore {
             .map_err(UpdateError::Other)?;
 
         match result {
-            RespValue::Nil => {
+            false => {
                 // The SET operation was not performed because the XX condition was not verified.
                 // This can happen if the session state expired between the load operation and the
                 // update operation. Unlucky, to say the least. We fall back to the `save` routine
@@ -230,30 +229,18 @@ impl SessionStore for RedisActorSessionStore {
                         SaveError::Other(err) => UpdateError::Other(err),
                     })
             }
-            RespValue::SimpleString(_) => Ok(session_key),
-            val => Err(UpdateError::Other(anyhow::anyhow!(
-                "Failed to update session state. {:?}",
-                val
-            ))),
+            true => Ok(session_key),
         }
     }
 
     async fn delete(&self, session_key: &SessionKey) -> Result<(), anyhow::Error> {
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
-        let res = self
-            .addr
-            .send(Command(resp_array!["DEL", cache_key]))
-            .await?;
+        let res = self.addr.send(command::del(cache_key)).await??;
 
-        match res {
-            // Redis returns the number of deleted records
-            Ok(RespValue::Integer(_)) => Ok(()),
-            val => Err(anyhow::anyhow!(
-                "Failed to remove session from cache. {:?}",
-                val
-            )),
-        }
+        // Redis returns the number of deleted records
+        let _res = res;
+        Ok(())
     }
 }
 
@@ -264,8 +251,14 @@ mod test {
     use super::*;
     use crate::test_helpers::acceptance_test_suite;
 
+    #[cfg(not(feature = "redis-cluster"))]
     fn redis_actor_store() -> RedisActorSessionStore {
         RedisActorSessionStore::new("127.0.0.1:6379")
+    }
+
+    #[cfg(feature = "redis-cluster")]
+    fn redis_actor_store() -> RedisActorSessionStore {
+        RedisActorSessionStore::new("127.0.0.1:7000")
     }
 
     #[actix_web::test]

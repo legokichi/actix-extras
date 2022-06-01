@@ -5,6 +5,7 @@ use redis_async::resp::RespValue;
 use tokio::sync::oneshot;
 
 use std::collections::HashMap;
+use std::io;
 
 use crate::command::{Asking, ClusterSlots, RedisClusterCommand, RedisCommand};
 use crate::{Error, RedisActor, RespError, Slots};
@@ -239,6 +240,18 @@ impl Supervised for RedisClusterActor {
         self.connections.clear();
     }
 }
+
+impl actix::io::WriteHandler<io::Error> for RedisClusterActor {
+    fn error(&mut self, err: io::Error, _: &mut Self::Context) -> Running {
+        warn!(
+            "Redis connection dropped: {} error: {}",
+            self.initial_addr, err
+        );
+        Running::Stop
+    }
+}
+
+// TODO: StreamHandler
 
 impl<T> Handler<T> for RedisClusterActor
 where

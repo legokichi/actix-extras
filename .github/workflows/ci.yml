@@ -113,16 +113,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Install Redis CLI
-        run: |
-            brew install redis
-
-      - name: Configure Redis
-        run: |
-          for port in {7000..7005}; do
-            redis-cli -p "$port" CONFIG SET cluster-node-timeout 1000
-          done
-
       - name: Install ${{ matrix.version }}
         uses: actions-rs/toolchain@v1
         with:
