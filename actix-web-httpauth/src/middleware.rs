@@ -1,19 +1,21 @@
 //! HTTP Authentication middleware.
 
 use std::{
-    error::Error as StdError, future::Future, marker::PhantomData, pin::Pin, rc::Rc, sync::Arc,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+    task::{Context, Poll},
 };
 
 use actix_web::{
-    body::{AnyBody, MessageBody},
+    body::{EitherBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform},
     Error,
 };
-use futures_util::{
-    future::{self, FutureExt as _, LocalBoxFuture, TryFutureExt as _},
-    ready,
-    task::{Context, Poll},
-};
+use futures_core::ready;
+use futures_util::future::{self, FutureExt as _, LocalBoxFuture, TryFutureExt as _};
 
 use crate::extractors::{basic, bearer, AuthExtractor};
 
@@ -57,7 +59,6 @@ where
     /// Construct `HttpAuthentication` middleware for the HTTP "Basic" authentication scheme.
     ///
     /// # Example
-    ///
     /// ```
     /// # use actix_web::Error;
     /// # use actix_web::dev::ServiceRequest;
@@ -89,7 +90,6 @@ where
     /// Construct `HttpAuthentication` middleware for the HTTP "Bearer" authentication scheme.
     ///
     /// # Example
-    ///
     /// ```
     /// # use actix_web::Error;
     /// # use actix_web::dev::ServiceRequest;
@@ -124,9 +124,8 @@ where
     O: Future<Output = Result<ServiceRequest, Error>> + 'static,
     T: AuthExtractor + 'static,
     B: MessageBody + 'static,
-    B::Error: StdError,
 {
-    type Response = ServiceResponse;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = Error;
     type Transform = AuthenticationMiddleware<S, F, T>;
     type InitError = ();
@@ -159,11 +158,10 @@ where
     O: Future<Output = Result<ServiceRequest, Error>> + 'static,
     T: AuthExtractor + 'static,
     B: MessageBody + 'static,
-    B::Error: StdError,
 {
-    type Response = ServiceResponse;
+    type Response = ServiceResponse<EitherBody<B>>;
     type Error = S::Error;
-    type Future = LocalBoxFuture<'static, Result<ServiceResponse, Error>>;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     actix_service::forward_ready!(service);
 
@@ -176,7 +174,7 @@ where
             let (req, credentials) = match Extract::<T>::new(req).await {
                 Ok(req) => req,
                 Err((err, req)) => {
-                    return Ok(req.error_response(err));
+                    return Ok(req.error_response(err).map_into_right_body());
                 }
             };
 
@@ -184,10 +182,7 @@ where
             // middleware to do their thing (eg. cors adding headers)
             let req = process_fn(req, credentials).await?;
 
-            service
-                .call(req)
-                .await
-                .map(|res| res.map_body(|_, body| AnyBody::from_message(body)))
+            service.call(req).await.map(|res| res.map_into_left_body())
         }
         .boxed_local()
     }
@@ -245,17 +240,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extractors::basic::BasicAuth;
     use crate::extractors::bearer::BearerAuth;
     use actix_service::{into_service, Service};
-    use actix_web::error;
+    use actix_web::error::ErrorForbidden;
+    use actix_web::http::StatusCode;
     use actix_web::test::TestRequest;
+    use actix_web::{error, web, App, HttpResponse};
 
     /// This is a test for https://github.com/actix/actix-extras/issues/10
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_middleware_panic() {
         let middleware = AuthenticationMiddleware {
             service: Rc::new(into_service(|_: ServiceRequest| async move {
-                actix_rt::time::sleep(std::time::Duration::from_secs(1)).await;
+                actix_web::rt::time::sleep(std::time::Duration::from_secs(1)).await;
                 Err::<ServiceResponse, _>(error::ErrorBadRequest("error"))
             })),
             process_fn: Arc::new(|req, _: BearerAuth| async { Ok(req) }),
@@ -274,11 +272,11 @@ mod tests {
     }
 
     /// This is a test for https://github.com/actix/actix-extras/issues/10
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_middleware_panic_several_orders() {
         let middleware = AuthenticationMiddleware {
             service: Rc::new(into_service(|_: ServiceRequest| async move {
-                actix_rt::time::sleep(std::time::Duration::from_secs(1)).await;
+                actix_web::rt::time::sleep(std::time::Duration::from_secs(1)).await;
                 Err::<ServiceResponse, _>(error::ErrorBadRequest("error"))
             })),
             process_fn: Arc::new(|req, _: BearerAuth| async { Ok(req) }),
@@ -308,5 +306,107 @@ mod tests {
         assert!(f1.is_err());
         assert!(f2.is_err());
         assert!(f3.is_err());
+    }
+
+    #[actix_web::test]
+    async fn test_middleware_opt_extractor() {
+        let middleware = AuthenticationMiddleware {
+            service: Rc::new(into_service(|req: ServiceRequest| async move {
+                Ok::<ServiceResponse, _>(req.into_response(HttpResponse::Ok().finish()))
+            })),
+            process_fn: Arc::new(|req, auth: Option<BearerAuth>| {
+                assert!(auth.is_none());
+                async { Ok(req) }
+            }),
+            _extractor: PhantomData,
+        };
+
+        let req = TestRequest::get()
+            .append_header(("Authorization996", "Bearer 1"))
+            .to_srv_request();
+
+        let f = middleware.call(req).await;
+
+        let _res = futures_util::future::lazy(|cx| middleware.poll_ready(cx)).await;
+
+        assert!(f.is_ok());
+    }
+
+    #[actix_web::test]
+    async fn test_middleware_res_extractor() {
+        let middleware = AuthenticationMiddleware {
+            service: Rc::new(into_service(|req: ServiceRequest| async move {
+                Ok::<ServiceResponse, _>(req.into_response(HttpResponse::Ok().finish()))
+            })),
+            process_fn: Arc::new(
+                |req, auth: Result<BearerAuth, <BearerAuth as AuthExtractor>::Error>| {
+                    assert!(auth.is_err());
+                    async { Ok(req) }
+                },
+            ),
+            _extractor: PhantomData,
+        };
+
+        let req = TestRequest::get()
+            .append_header(("Authorization", "BearerLOL"))
+            .to_srv_request();
+
+        let f = middleware.call(req).await;
+
+        let _res = futures_util::future::lazy(|cx| middleware.poll_ready(cx)).await;
+
+        assert!(f.is_ok());
+    }
+
+    #[actix_web::test]
+    async fn test_middleware_works_with_app() {
+        async fn validator(
+            _req: ServiceRequest,
+            _credentials: BasicAuth,
+        ) -> Result<ServiceRequest, actix_web::Error> {
+            Err(ErrorForbidden("You are not welcome!"))
+        }
+        let middleware = HttpAuthentication::basic(validator);
+
+        let srv = actix_web::test::init_service(
+            App::new()
+                .wrap(middleware)
+                .route("/", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::with_uri("/")
+            .append_header(("Authorization", "Basic DontCare"))
+            .to_request();
+
+        let resp = srv.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn test_middleware_works_with_scope() {
+        async fn validator(
+            _req: ServiceRequest,
+            _credentials: BasicAuth,
+        ) -> Result<ServiceRequest, actix_web::Error> {
+            Err(ErrorForbidden("You are not welcome!"))
+        }
+        let middleware = actix_web::middleware::Compat::new(HttpAuthentication::basic(validator));
+
+        let srv = actix_web::test::init_service(
+            App::new().service(
+                web::scope("/")
+                    .wrap(middleware)
+                    .route("/", web::get().to(HttpResponse::Ok)),
+            ),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::with_uri("/")
+            .append_header(("Authorization", "Basic DontCare"))
+            .to_request();
+
+        let resp = srv.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

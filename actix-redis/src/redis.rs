@@ -1,21 +1,24 @@
+use std::collections::VecDeque;
+use std::io;
+
 use actix::prelude::*;
 use actix_rt::net::TcpStream;
-use actix_service::Service;
-use actix_tls::connect::{ConnectInfo, Connector, ConnectorService};
+use actix_service::boxed::{self, BoxService};
+use actix_tls::connect::{ConnectError, ConnectInfo, Connection, ConnectorService};
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
-use futures::FutureExt;
 use log::{error, info, warn};
 use redis_async::error::Error as RespError;
 use redis_async::resp::{RespCodec, RespValue};
-use std::collections::VecDeque;
-use std::io;
 use tokio::io::{split, WriteHalf};
 use tokio::sync::oneshot;
 use tokio_util::codec::FramedRead;
 
-use crate::command::RedisCommand;
 use crate::Error;
+
+use crate::command::RedisCommand;
+use actix_service::Service;
+use futures::FutureExt;
 
 /// Command for send data to Redis
 #[derive(Debug)]
@@ -28,7 +31,7 @@ impl Message for Command {
 /// Redis communication actor
 pub struct RedisActor {
     addr: String,
-    connector: ConnectorService,
+    connector: BoxService<ConnectInfo<String>, Connection<String, TcpStream>, ConnectError>,
     backoff: ExponentialBackoff,
     cell: Option<actix::io::FramedWrite<RespValue, WriteHalf<TcpStream>, RespCodec>>,
     queue: VecDeque<oneshot::Sender<Result<RespValue, Error>>>,
@@ -46,7 +49,7 @@ impl RedisActor {
 
         Supervisor::start(|_| RedisActor {
             addr,
-            connector: Connector::default().service(),
+            connector: boxed::service(ConnectorService::default()),
             cell: None,
             backoff,
             queue: VecDeque::new(),
@@ -161,7 +164,7 @@ where
         Box::pin(rx.map(|res| match res {
             Ok(Ok(resp)) => match T::deserialize(resp) {
                 Ok(output) => Ok(output),
-                Err(e) => Err(Error::Redis(RespError::RESP(e.message, e.resp))),
+                Err(e) => Err(Error::Redis(RespError::Resp(e.message, e.resp))),
             },
             Ok(Err(e)) => Err(e),
             Err(_) => Err(Error::Disconnected),

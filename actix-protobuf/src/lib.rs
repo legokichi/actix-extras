@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, nonstandard_style)]
+#![warn(future_incompatible)]
 
 use std::{
     fmt,
@@ -10,6 +11,7 @@ use std::{
 };
 
 use actix_web::{
+    body::BoxBody,
     dev::Payload,
     error::PayloadError,
     http::header::{CONTENT_LENGTH, CONTENT_TYPE},
@@ -124,7 +126,6 @@ impl<T> FromRequest for ProtoBuf<T>
 where
     T: Message + Default + 'static,
 {
-    type Config = ProtoBufConfig;
     type Error = Error;
     type Future = LocalBoxFuture<'static, Result<Self, Error>>;
 
@@ -145,6 +146,8 @@ where
 }
 
 impl<T: Message + Default> Responder for ProtoBuf<T> {
+    type Body = BoxBody;
+
     fn respond_to(self, _: &HttpRequest) -> HttpResponse {
         let mut buf = Vec::new();
         match self.0.encode(&mut buf) {
@@ -291,19 +294,19 @@ mod tests {
         pub name: String,
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_protobuf() {
         let protobuf = ProtoBuf(MyObject {
             number: 9,
             name: "test".to_owned(),
         });
         let req = TestRequest::default().to_http_request();
-        let resp = protobuf.respond_to(&req).await.unwrap();
+        let resp = protobuf.respond_to(&req);
         let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
         assert_eq!(ct, "application/protobuf");
     }
 
-    #[actix_rt::test]
+    #[actix_web::test]
     async fn test_protobuf_message() {
         let (req, mut pl) = TestRequest::default().to_http_parts();
         let protobuf = ProtoBufMessage::<MyObject>::new(&req, &mut pl).await;
