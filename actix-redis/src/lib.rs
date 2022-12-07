@@ -10,8 +10,6 @@ mod redis;
 pub mod slot;
 
 pub use cluster::RedisClusterActor;
-pub use redis::{Command, RedisActor};
-
 use derive_more::{Display, Error, From};
 pub use redis::{Command, RedisActor};
 

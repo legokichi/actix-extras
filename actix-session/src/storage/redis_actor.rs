@@ -3,9 +3,7 @@ use actix::Addr;
 use actix_redis::RedisActor;
 #[cfg(feature = "redis-cluster")]
 use actix_redis::RedisClusterActor as RedisActor;
-use actix_redis::{command, resp_array, Command, RedisActor, RespValue};
-use time::{self, Duration};
-use actix_redis::{};
+use actix_redis::{command, resp_array, Command, RespValue};
 use actix_web::cookie::time::Duration;
 use anyhow::Error;
 
