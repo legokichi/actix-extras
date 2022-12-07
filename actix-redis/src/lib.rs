@@ -1,5 +1,6 @@
 //! Redis integration for `actix`.
 
+#![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, nonstandard_style)]
 #![warn(future_incompatible)]
 
@@ -12,6 +13,7 @@ pub use cluster::RedisClusterActor;
 pub use redis::{Command, RedisActor};
 
 use derive_more::{Display, Error, From};
+pub use redis::{Command, RedisActor};
 
 /// General purpose `actix-redis` error.
 #[derive(Debug, Display, Error, From)]

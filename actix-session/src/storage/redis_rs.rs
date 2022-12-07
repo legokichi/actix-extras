@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{convert::TryInto, sync::Arc};
 
-use redis::{aio::ConnectionManager, AsyncCommands, Value};
-use time::{self, Duration};
+use actix_web::cookie::time::Duration;
+use anyhow::{Context, Error};
+use redis::{aio::ConnectionManager, AsyncCommands, Cmd, FromRedisValue, RedisResult, Value};
 
 use super::SessionKey;
 use crate::storage::{
@@ -28,6 +29,7 @@ use crate::storage::{
 ///     let secret_key = get_secret_key();
 ///     let redis_connection_string = "redis://127.0.0.1:6379";
 ///     let store = RedisSessionStore::new(redis_connection_string).await.unwrap();
+///
 ///     HttpServer::new(move ||
 ///             App::new()
 ///             .wrap(SessionMiddleware::new(
@@ -136,10 +138,9 @@ impl RedisSessionStoreBuilder {
 impl SessionStore for RedisSessionStore {
     async fn load(&self, session_key: &SessionKey) -> Result<Option<SessionState>, LoadError> {
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
+
         let value: Option<String> = self
-            .client
-            .clone()
-            .get(cache_key)
+            .execute_command(redis::cmd("GET").arg(&[&cache_key]))
             .await
             .map_err(Into::into)
             .map_err(LoadError::Other)?;
@@ -163,18 +164,16 @@ impl SessionStore for RedisSessionStore {
         let session_key = generate_session_key();
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
-        redis::cmd("SET")
-            .arg(&[
-                &cache_key,
-                &body,
-                "NX", // NX: only set the key if it does not already exist
-                "EX", // EX: set expiry
-                &format!("{}", ttl.whole_seconds()),
-            ])
-            .query_async(&mut self.client.clone())
-            .await
-            .map_err(Into::into)
-            .map_err(SaveError::Other)?;
+        self.execute_command(redis::cmd("SET").arg(&[
+            &cache_key,
+            &body,
+            "NX", // NX: only set the key if it does not already exist
+            "EX", // EX: set expiry
+            &format!("{}", ttl.whole_seconds()),
+        ]))
+        .await
+        .map_err(Into::into)
+        .map_err(SaveError::Other)?;
 
         Ok(session_key)
     }
@@ -191,15 +190,14 @@ impl SessionStore for RedisSessionStore {
 
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
-        let v: redis::Value = redis::cmd("SET")
-            .arg(&[
+        let v: redis::Value = self
+            .execute_command(redis::cmd("SET").arg(&[
                 &cache_key,
                 &body,
                 "XX", // XX: Only set the key if it already exist.
                 "EX", // EX: set expiry
                 &format!("{}", ttl.whole_seconds()),
-            ])
-            .query_async(&mut self.client.clone())
+            ]))
             .await
             .map_err(Into::into)
             .map_err(UpdateError::Other)?;
@@ -225,12 +223,24 @@ impl SessionStore for RedisSessionStore {
         }
     }
 
-    async fn delete(&self, session_key: &SessionKey) -> Result<(), anyhow::Error> {
+    async fn update_ttl(&self, session_key: &SessionKey, ttl: &Duration) -> Result<(), Error> {
         let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
 
         self.client
             .clone()
-            .del(&cache_key)
+            .expire(
+                &cache_key,
+                ttl.whole_seconds().try_into().context(
+                    "Failed to convert the state TTL into the number of whole seconds remaining",
+                )?,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete(&self, session_key: &SessionKey) -> Result<(), anyhow::Error> {
+        let cache_key = (self.configuration.cache_keygen)(session_key.as_ref());
+        self.execute_command(redis::cmd("DEL").arg(&[&cache_key]))
             .await
             .map_err(Into::into)
             .map_err(UpdateError::Other)?;
@@ -239,10 +249,50 @@ impl SessionStore for RedisSessionStore {
     }
 }
 
+impl RedisSessionStore {
+    /// Execute Redis command and retry once in certain cases.
+    ///
+    /// `ConnectionManager` automatically reconnects when it encounters an error talking to Redis.
+    /// The request that bumped into the error, though, fails.
+    ///
+    /// This is generally OK, but there is an unpleasant edge case: Redis client timeouts. The
+    /// server is configured to drop connections who have been active longer than a pre-determined
+    /// threshold. `redis-rs` does not proactively detect that the connection has been dropped - you
+    /// only find out when you try to use it.
+    ///
+    /// This helper method catches this case (`.is_connection_dropped`) to execute a retry. The
+    /// retry will be executed on a fresh connection, therefore it is likely to succeed (or fail for
+    /// a different more meaningful reason).
+    async fn execute_command<T: FromRedisValue>(&self, cmd: &mut Cmd) -> RedisResult<T> {
+        let mut can_retry = true;
+
+        loop {
+            match cmd.query_async(&mut self.client.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    if can_retry && err.is_connection_dropped() {
+                        tracing::debug!(
+                            "Connection dropped while trying to talk to Redis. Retrying."
+                        );
+
+                        // Retry at most once
+                        can_retry = false;
+
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::HashMap;
 
+    use actix_web::cookie::time;
     use redis::AsyncCommands;
 
     use super::*;

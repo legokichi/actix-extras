@@ -5,11 +5,11 @@
 //! influenced by the provided inputs (i.e. the request content) and whatever state the server
 //! queries while performing its processing.
 //!
-//! Stateless systems are easier to reason about, but they are not quite as powerful as we need to
-//! be - e.g. how do you authenticate a user? The user would be forced to authenticate **for every
-//! single request**. That is, for example, how 'Basic' Authentication works. While it may work for
-//! a machine user (i.e. an API client), it is impractical for a person—you do not want a login
-//! prompt on every single page you navigate to!
+//! Stateless systems are easier to reason about, but they are not quite as powerful as we need them
+//! to be - e.g. how do you authenticate a user? The user would be forced to authenticate **for
+//! every single request**. That is, for example, how 'Basic' Authentication works. While it may
+//! work for a machine user (i.e. an API client), it is impractical for a person—you do not want a
+//! login prompt on every single page you navigate to!
 //!
 //! There is a solution - **sessions**. Using sessions the server can attach state to a set of
 //! requests coming from the same client. They are built on top of cookies - the server sets a
@@ -133,38 +133,32 @@
 //! [`RedisSessionStore`]: storage::RedisSessionStore
 //! [`RedisActorSessionStore`]: storage::RedisActorSessionStore
 
+#![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, nonstandard_style)]
 #![warn(future_incompatible, missing_docs)]
 #![doc(html_logo_url = "https://actix.rs/img/logo.png")]
 #![doc(html_favicon_url = "https://actix.rs/favicon.ico")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod config;
 mod middleware;
 mod session;
 mod session_ext;
 pub mod storage;
 
-pub use self::middleware::{
-    CookieContentSecurity, SessionLength, SessionMiddleware, SessionMiddlewareBuilder,
-};
-pub use self::session::{Session, SessionStatus};
+pub use self::middleware::SessionMiddleware;
+pub use self::session::{Session, SessionGetError, SessionInsertError, SessionStatus};
 pub use self::session_ext::SessionExt;
 
 #[cfg(test)]
 pub mod test_helpers {
     use actix_web::cookie::Key;
-    use rand::{distributions::Alphanumeric, thread_rng, Rng};
 
-    use crate::{storage::SessionStore, CookieContentSecurity};
+    use crate::{config::CookieContentSecurity, storage::SessionStore};
 
     /// Generate a random cookie signing/encryption key.
     pub fn key() -> Key {
-        let signing_key: String = thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect();
-        Key::from(signing_key.as_bytes())
+        Key::generate()
     }
 
     /// A ready-to-go acceptance test suite to verify that sessions behave as expected
@@ -187,29 +181,35 @@ pub mod test_helpers {
             acceptance_tests::basic_workflow(store_builder.clone(), *policy).await;
             acceptance_tests::expiration_is_refreshed_on_changes(store_builder.clone(), *policy)
                 .await;
+            acceptance_tests::expiration_is_always_refreshed_if_configured_to_refresh_on_every_request(
+                store_builder.clone(),
+                *policy,
+            )
+            .await;
             acceptance_tests::complex_workflow(
                 store_builder.clone(),
                 is_invalidation_supported,
                 *policy,
             )
             .await;
+            acceptance_tests::guard(store_builder.clone(), *policy).await;
         }
     }
 
     mod acceptance_tests {
         use actix_web::{
-            dev::Service,
-            middleware, test,
+            cookie::time,
+            dev::{Service, ServiceResponse},
+            guard, middleware, test,
             web::{self, get, post, resource, Bytes},
             App, HttpResponse, Result,
         };
         use serde::{Deserialize, Serialize};
         use serde_json::json;
-        use time::Duration;
 
+        use crate::config::{CookieContentSecurity, PersistentSession, TtlExtensionPolicy};
         use crate::{
-            middleware::SessionLength, storage::SessionStore, test_helpers::key,
-            CookieContentSecurity, Session, SessionMiddleware,
+            storage::SessionStore, test_helpers::key, Session, SessionExt, SessionMiddleware,
         };
 
         pub(super) async fn basic_workflow<F, Store>(
@@ -227,9 +227,10 @@ pub mod test_helpers {
                             .cookie_name("actix-test".into())
                             .cookie_domain(Some("localhost".into()))
                             .cookie_content_security(policy)
-                            .session_length(SessionLength::Predetermined {
-                                max_session_length: Some(time::Duration::seconds(100)),
-                            })
+                            .session_lifecycle(
+                                PersistentSession::default()
+                                    .session_ttl(time::Duration::seconds(100)),
+                            )
                             .build(),
                     )
                     .service(web::resource("/").to(|ses: Session| async move {
@@ -245,12 +246,7 @@ pub mod test_helpers {
 
             let request = test::TestRequest::get().to_request();
             let response = app.call(request).await.unwrap();
-            let cookie = response
-                .response()
-                .cookies()
-                .find(|c| c.name() == "actix-test")
-                .unwrap()
-                .clone();
+            let cookie = response.get_cookie("actix-test").unwrap().clone();
             assert_eq!(cookie.path().unwrap(), "/test/");
 
             let request = test::TestRequest::with_uri("/test/")
@@ -260,6 +256,55 @@ pub mod test_helpers {
             assert_eq!(body, Bytes::from_static(b"counter: 100"));
         }
 
+        pub(super) async fn expiration_is_always_refreshed_if_configured_to_refresh_on_every_request<
+            F,
+            Store,
+        >(
+            store_builder: F,
+            policy: CookieContentSecurity,
+        ) where
+            Store: SessionStore + 'static,
+            F: Fn() -> Store + Clone + Send + 'static,
+        {
+            let session_ttl = time::Duration::seconds(60);
+            let app = test::init_service(
+                App::new()
+                    .wrap(
+                        SessionMiddleware::builder(store_builder(), key())
+                            .cookie_content_security(policy)
+                            .session_lifecycle(
+                                PersistentSession::default()
+                                    .session_ttl(session_ttl)
+                                    .session_ttl_extension_policy(
+                                        TtlExtensionPolicy::OnEveryRequest,
+                                    ),
+                            )
+                            .build(),
+                    )
+                    .service(web::resource("/").to(|ses: Session| async move {
+                        let _ = ses.insert("counter", 100);
+                        "test"
+                    }))
+                    .service(web::resource("/test/").to(|| async move { "no-changes-in-session" })),
+            )
+            .await;
+
+            // Create session
+            let request = test::TestRequest::get().to_request();
+            let response = app.call(request).await.unwrap();
+            let cookie_1 = response.get_cookie("id").expect("Cookie is set");
+            assert_eq!(cookie_1.max_age(), Some(session_ttl));
+
+            // Fire a request that doesn't touch the session state, check
+            // that the session cookie is present and its expiry is set to the maximum we configured.
+            let request = test::TestRequest::with_uri("/test/")
+                .cookie(cookie_1)
+                .to_request();
+            let response = app.call(request).await.unwrap();
+            let cookie_2 = response.get_cookie("id").expect("Cookie is set");
+            assert_eq!(cookie_2.max_age(), Some(session_ttl));
+        }
+
         pub(super) async fn expiration_is_refreshed_on_changes<F, Store>(
             store_builder: F,
             policy: CookieContentSecurity,
@@ -267,14 +312,15 @@ pub mod test_helpers {
             Store: SessionStore + 'static,
             F: Fn() -> Store + Clone + Send + 'static,
         {
+            let session_ttl = time::Duration::seconds(60);
             let app = test::init_service(
                 App::new()
                     .wrap(
                         SessionMiddleware::builder(store_builder(), key())
                             .cookie_content_security(policy)
-                            .session_length(SessionLength::Predetermined {
-                                max_session_length: Some(time::Duration::seconds(60)),
-                            })
+                            .session_lifecycle(
+                                PersistentSession::default().session_ttl(session_ttl),
+                            )
                             .build(),
                     )
                     .service(web::resource("/").to(|ses: Session| async move {
@@ -287,25 +333,104 @@ pub mod test_helpers {
 
             let request = test::TestRequest::get().to_request();
             let response = app.call(request).await.unwrap();
-            let cookie_1 = response
-                .response()
-                .cookies()
-                .find(|c| c.name() == "id")
-                .expect("Cookie is set");
-            assert_eq!(cookie_1.max_age(), Some(Duration::seconds(60)));
+            let cookie_1 = response.get_cookie("id").expect("Cookie is set");
+            assert_eq!(cookie_1.max_age(), Some(session_ttl));
 
-            let request = test::TestRequest::with_uri("/test/").to_request();
+            let request = test::TestRequest::with_uri("/test/")
+                .cookie(cookie_1.clone())
+                .to_request();
             let response = app.call(request).await.unwrap();
             assert!(response.response().cookies().next().is_none());
 
-            let request = test::TestRequest::get().to_request();
+            let request = test::TestRequest::get().cookie(cookie_1).to_request();
             let response = app.call(request).await.unwrap();
-            let cookie_2 = response
-                .response()
+            let cookie_2 = response.get_cookie("id").expect("Cookie is set");
+            assert_eq!(cookie_2.max_age(), Some(session_ttl));
+        }
+
+        pub(super) async fn guard<F, Store>(store_builder: F, policy: CookieContentSecurity)
+        where
+            Store: SessionStore + 'static,
+            F: Fn() -> Store + Clone + Send + 'static,
+        {
+            let srv = actix_test::start(move || {
+                App::new()
+                    .wrap(
+                        SessionMiddleware::builder(store_builder(), key())
+                            .cookie_name("test-session".into())
+                            .cookie_content_security(policy)
+                            .session_lifecycle(
+                                PersistentSession::default().session_ttl(time::Duration::days(7)),
+                            )
+                            .build(),
+                    )
+                    .wrap(middleware::Logger::default())
+                    .service(resource("/").route(get().to(index)))
+                    .service(resource("/do_something").route(post().to(do_something)))
+                    .service(resource("/login").route(post().to(login)))
+                    .service(resource("/logout").route(post().to(logout)))
+                    .service(
+                        web::scope("/protected")
+                            .guard(guard::fn_guard(|g| {
+                                g.get_session().get::<String>("user_id").unwrap().is_some()
+                            }))
+                            .service(resource("/count").route(get().to(count))),
+                    )
+            });
+
+            // Step 1: GET without session info
+            //   - response should be a unsuccessful status
+            let req_1 = srv.get("/protected/count").send();
+            let resp_1 = req_1.await.unwrap();
+            assert!(!resp_1.status().is_success());
+
+            // Step 2: POST to login
+            //   - set-cookie actix-session will be in response  (session cookie #1)
+            //   - updates session state: {"counter": 0, "user_id": "ferris"}
+            let req_2 = srv.post("/login").send_json(&json!({"user_id": "ferris"}));
+            let resp_2 = req_2.await.unwrap();
+            let cookie_1 = resp_2
                 .cookies()
-                .find(|c| c.name() == "id")
-                .expect("Cookie is set");
-            assert_eq!(cookie_2.max_age(), Some(Duration::seconds(60)));
+                .unwrap()
+                .clone()
+                .into_iter()
+                .find(|c| c.name() == "test-session")
+                .unwrap();
+
+            // Step 3: POST to do_something
+            //   - adds new session state:  {"counter": 1, "user_id": "ferris" }
+            //   - set-cookie actix-session should be in response (session cookie #2)
+            //   - response should be: {"counter": 1, "user_id": None}
+            let req_3 = srv.post("/do_something").cookie(cookie_1.clone()).send();
+            let mut resp_3 = req_3.await.unwrap();
+            let result_3 = resp_3.json::<IndexResponse>().await.unwrap();
+            assert_eq!(
+                result_3,
+                IndexResponse {
+                    user_id: Some("ferris".into()),
+                    counter: 1
+                }
+            );
+            let cookie_2 = resp_3
+                .cookies()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .find(|c| c.name() == "test-session")
+                .unwrap();
+
+            // Step 4: GET using a existing user id
+            //   - response should be: {"counter": 3, "user_id": "ferris"}
+            let req_4 = srv.get("/protected/count").cookie(cookie_2.clone()).send();
+            let mut resp_4 = req_4.await.unwrap();
+            let result_4 = resp_4.json::<IndexResponse>().await.unwrap();
+            assert_eq!(
+                result_4,
+                IndexResponse {
+                    user_id: Some("ferris".into()),
+                    counter: 1
+                }
+            );
         }
 
         pub(super) async fn complex_workflow<F, Store>(
@@ -316,15 +441,16 @@ pub mod test_helpers {
             Store: SessionStore + 'static,
             F: Fn() -> Store + Clone + Send + 'static,
         {
+            let session_ttl = time::Duration::days(7);
             let srv = actix_test::start(move || {
                 App::new()
                     .wrap(
                         SessionMiddleware::builder(store_builder(), key())
                             .cookie_name("test-session".into())
                             .cookie_content_security(policy)
-                            .session_length(SessionLength::Predetermined {
-                                max_session_length: Some(time::Duration::days(7)),
-                            })
+                            .session_lifecycle(
+                                PersistentSession::default().session_ttl(session_ttl),
+                            )
                             .build(),
                     )
                     .wrap(middleware::Logger::default())
@@ -370,7 +496,7 @@ pub mod test_helpers {
                 .into_iter()
                 .find(|c| c.name() == "test-session")
                 .unwrap();
-            assert_eq!(cookie_1.max_age(), Some(Duration::days(7)));
+            assert_eq!(cookie_1.max_age(), Some(session_ttl));
 
             // Step 3:  GET index, including session cookie #1 in request
             //   - set-cookie will *not* be in response
@@ -408,7 +534,7 @@ pub mod test_helpers {
                 .into_iter()
                 .find(|c| c.name() == "test-session")
                 .unwrap();
-            assert_eq!(cookie_2.max_age(), Some(Duration::days(7)));
+            assert_eq!(cookie_2.max_age(), cookie_1.max_age());
 
             // Step 5: POST to login, including session cookie #2 in request
             //   - set-cookie actix-session will be in response  (session cookie #3)
@@ -549,6 +675,13 @@ pub mod test_helpers {
             Ok(HttpResponse::Ok().json(&IndexResponse { user_id, counter }))
         }
 
+        async fn count(session: Session) -> Result<HttpResponse> {
+            let user_id: Option<String> = session.get::<String>("user_id").unwrap();
+            let counter: i32 = session.get::<i32>("counter").unwrap().unwrap();
+
+            Ok(HttpResponse::Ok().json(&IndexResponse { user_id, counter }))
+        }
+
         #[derive(Deserialize)]
         struct Identity {
             user_id: String,
@@ -581,6 +714,19 @@ pub mod test_helpers {
             };
 
             Ok(HttpResponse::Ok().body(body))
+        }
+
+        trait ServiceResponseExt {
+            fn get_cookie(&self, cookie_name: &str) -> Option<actix_web::cookie::Cookie<'_>>;
+        }
+
+        impl ServiceResponseExt for ServiceResponse {
+            fn get_cookie(&self, cookie_name: &str) -> Option<actix_web::cookie::Cookie<'_>> {
+                self.response()
+                    .cookies()
+                    .into_iter()
+                    .find(|c| c.name() == cookie_name)
+            }
         }
     }
 }
